@@ -2,6 +2,8 @@
 
 ## Round 5: record compression and report improvements
 
+Scoring-box result of the retained round-5 code (commit a2d6a0b): `run-3d39ac096bc7`, T **0.03924 s**, M **29.9 MB**, S 298, K **33.4** (round 4 on the box: `run-c40bb50695d3`, 0.04029 s, 36.7 MB, S 283, K 31.9). The 6.8 MB memory cut outweighs the 15 extra counted lines.
+
 Each row in this round uses the lead's check script on the 8-thread Intel i5-1035G1 test laptop ("Acer") for exact seed-1 sample, full and seed-2 full SHA gates; times are five-run Acer full medians and KB are cgroup `memory.peak`. The board's official 12-thread i5-13500 figures are different and are not silently substituted for Acer results.
 
 | Step | Change | Acer median | Peak KB | Official S | Decision |
