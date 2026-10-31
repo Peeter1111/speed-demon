@@ -3,8 +3,8 @@
 // Two phases, both on every hardware thread:
 //   1. Parse. The mapped log is cut into newline-aligned chunks that threads take from a counter. Each line is
 //      read once: the hour comes from fixed byte offsets, the endpoint is found with one AVX2 compare and interned
-//      in the thread's own table, and a 6-byte record (endpoint id + 5xx flag, latency) goes into that thread's
-//      block chain for the hour.
+//      in the thread's own table, and a four-byte record (endpoint id + 5xx flag, compact latency) goes into its
+//      512-record per-hour block chain. Rare wide latencies are stored in a per-worker overflow vector.
 //   2. Report. After a barrier merges the endpoint tables into one byte-sorted list, threads take hours from a
 //      counter. An hour's records (about 43,000, cache resident) are counting-sorted by endpoint, the three
 //      nearest-rank values are selected per group, and the hour's lines are formatted into one buffer. The main
@@ -32,7 +32,7 @@ namespace {
 constexpr int kHours = 72;        // the spec fixes the span: 2026-10-30T18:00Z to 2026-11-02T17:59Z
 constexpr int kSlots = 8192;      // endpoint hash table size; each seed has 1,842 endpoints
 constexpr int kMaxEndpoints = 6000;
-constexpr int kBlock = 1024;      // records per block
+constexpr int kBlock = 512;       // records per block
 constexpr int kMaxLine = 220;     // longest possible line (125-byte endpoint); below this distance from the end
                                   // of the mapping, wide loads are replaced by bounded scans
 
@@ -70,12 +70,15 @@ struct Table {
     }
 };
 
-struct Block { Block* next; uint32_t n; uint16_t key[kBlock]; uint32_t lat[kBlock]; };
+// Record bits: endpoint id (11), 5xx (1), and a 20-bit latency payload.
+// A set high payload bit denotes a worker-local index into the exact u32 overflow values.
+struct Block { Block* next; uint32_t n; uint32_t rec[kBlock]; };
 
 struct Worker {
     Table names;                  // this thread's endpoints, in first-seen order
     Block* head[kHours] = {};     // newest block of each hour's chain
     std::vector<uint16_t> global; // local endpoint id -> rank in the byte-sorted global list
+    std::vector<uint32_t> wide;   // exact latencies >= 2^19, addressed by packed-record index
 };
 
 void parse(Worker& w, const char* p, const char* end, const char* map_end) {
@@ -98,7 +101,8 @@ void parse(Worker& w, const char* p, const char* end, const char* map_end) {
             while (*q != ' ') ++q;
         }
         uint32_t id = w.names.id(e, q - e);
-        uint16_t key = id | (q[1] == '5') << 15;        // status is three digits; 5xx is an error
+        if (id >= 2048) die("more than 2048 endpoints in one worker");
+        uint32_t key = id | uint32_t(q[1] == '5') << 11; // status is three digits; 5xx is an error
         const char* d = q + 5;
         uint32_t lat = *d++ - '0';
         while (*d != '\n') lat = lat * 10 + (*d++ - '0');
@@ -108,7 +112,13 @@ void parse(Worker& w, const char* p, const char* end, const char* map_end) {
             Block* fresh = static_cast<Block*>(malloc(sizeof(Block)));
             fresh->next = b, fresh->n = 0, w.head[hour] = b = fresh;
         }
-        b->key[b->n] = key, b->lat[b->n++] = lat;
+        uint32_t payload = lat;
+        if (lat >= (1u << 19)) {
+            if (w.wide.size() >= (1u << 19)) die("too many wide latencies per worker");
+            payload = (1u << 19) | uint32_t(w.wide.size());
+            w.wide.push_back(lat);
+        }
+        b->rec[b->n++] = (payload << 12) | key;
     }
 }
 
@@ -131,8 +141,8 @@ void report(int h, std::vector<std::unique_ptr<Worker>>& ws, const std::vector<E
     for (auto& w : ws)
         for (Block* b = w->head[h]; b; b = b->next)
             for (uint32_t i = 0; i < b->n; ++i) {
-                uint32_t g = w->global[b->key[i] & 0x7FFF];
-                count[g]++, errs[g] += b->key[i] >> 15;
+                uint32_t packed = b->rec[i], g = w->global[packed & 2047];
+                count[g]++, errs[g] += (packed >> 11) & 1;
             }
     // count becomes each group's end offset after the scatter below; begin = end - size.
     std::vector<uint32_t> size(count);
@@ -141,7 +151,11 @@ void report(int h, std::vector<std::unique_ptr<Worker>>& ws, const std::vector<E
     if (lat.size() < total) lat.resize(total);
     for (auto& w : ws)
         for (Block* b = w->head[h], *next; b; b = next) {
-            for (uint32_t i = 0; i < b->n; ++i) lat[count[w->global[b->key[i] & 0x7FFF]]++] = b->lat[i];
+            for (uint32_t i = 0; i < b->n; ++i) {
+                uint32_t packed = b->rec[i];
+                uint32_t value = packed & 0x80000000u ? w->wide[(packed >> 12) & 0x7FFFFu] : packed >> 12;
+                lat[count[w->global[packed & 2047]]++] = value;
+            }
             next = b->next;
             free(b);
         }

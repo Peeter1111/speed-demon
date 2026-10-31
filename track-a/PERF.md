@@ -1,5 +1,50 @@
 # Track A performance log
 
+## Round 5: record compression and report improvements
+
+Each row in this round uses the lead's check script on the 8-thread Intel i5-1035G1 test laptop ("Acer") for exact seed-1 sample, full and seed-2 full SHA gates; times are five-run Acer full medians and KB are cgroup `memory.peak`. The board's official 12-thread i5-13500 figures are different and are not silently substituted for Acer results.
+
+| Step | Change | Acer median | Peak KB | Official S | Decision |
+|---|---|---:|---:|---:|---|
+| R5-B0 | Unchanged lead round-four design | **0.085 s** (0.081, 0.084, 0.085, 0.086, 0.087) | **31,548** | **283** | Three SHA gates OK; baseline K_acer ~20.1 |
+| R5-K1 | 4-byte records: 11-bit endpoint id, 5xx flag, 19-bit common latency plus overflow index; exact u32 values in per-worker overflow arrays | **0.071 s** (0.057, 0.065, 0.071, 0.076, 0.083) | **28,248** | **298** | Three SHA gates OK; K_acer ~22.3. **Keep.** Saves 3,300 KB and 14 ms versus R5-B0. |
+| R5-K2 | Shrink record blocks from 1,024 to 512 | **0.060 s** (0.057, 0.058, 0.060, 0.063, 0.067) | **28,020** | **298** | Three SHA gates OK; K_acer ~24.3. **Keep.** Peak falls 228 KB and median improves 11 ms. |
+| R5-R1 | Shrink record blocks again, 512 to 256 | **0.067 s** (0.061, 0.065, 0.067, 0.072, 0.075) | **29,476** | **298** | Three SHA gates OK; K_acer ~22.7. **Revert.** Too many allocations and more peak memory under the real allocator. |
+| R5-R2 | Two-decimal-digit lookup table to format numbers | **0.070 s** (0.067, 0.070, 0.070, 0.074, 0.076) | **29,040** | **318** | Three SHA gates OK; K_acer ~22.1. **Revert** to smaller scalar digit loop; lookup table raised both S and wall time. |
+| R5-R3 | Cap parse/report pool to 4 threads (affinity still 8 available) | **0.073 s** (0.069, 0.073, 0.073, 0.077, 0.082) | **25,852** | **298** | Three SHA gates OK; K_acer ~22.3; slower than 8-thread K2 despite 2.2 MB saved. **Revert.** |
+| R5-R4 | Cap parse/report pool to 6 threads | **0.068 s** (0.063, 0.066, 0.068, 0.069, 0.071) | **27,636** | **298** | Three SHA gates OK; K_acer ~22.8. **Revert**, still below 8-thread K2. |
+| R5-R5 | `madvise(MADV_SEQUENTIAL)` on mmap before reading | **0.080 s** (0.058, 0.064, 0.080, 0.081, 0.093) | **28,048** | **299** | Three SHA gates OK; K_acer ~21.0. **Revert**: no stable gain and extra scored line. |
+| R5-R6 | Lower per-group `std::sort` threshold from 32 to 8, use more `std::nth_element` calls | **0.064 s** (0.063, 0.064, 0.064, 0.072, 0.089) | **29,236** | **298** | Three SHA gates OK; K_acer ~23.3. **Revert**: threshold 32 remains best. |
+| R5-R7 | Intermediate record block of 768 instead of 512 or 1024 | **0.067 s** (0.061, 0.065, 0.067, 0.073, 0.075) | **28,104** | **298** | Three SHA gates OK; K_acer ~22.9. **Revert**: 512 remains best, fewer bytes and lower median. |
+| R5-R8 | Split mmap into 4 instead of 8 chunks per thread | **0.063 s** (0.054, 0.054, 0.063, 0.074, 0.074) | **28,140** | **298** | Three SHA gates OK; K_acer ~23.6. **Revert**: no reproducible improvement over R5-K2. |
+| R5-R9 | `std::to_chars` integer formatting in place of scalar reversed-digit loop | **0.077 s** (0.058, 0.070, 0.077, 0.079, 0.086) | **27,852** | **291** | Three SHA gates OK; K_acer ~21.5. **Revert**: scored lines and KB lower, wall overhead too high. |
+| R5-R10 | SWAR 64-bit newline detection for common latency digit widths, bounded scalar fallback for 8-10 digit / mmap tail | **0.073 s** (0.071, 0.073, 0.073, 0.075, 0.079) | **28,692** | **309** | Three SHA gates OK; K_acer ~21.8. **Revert**: additional branch/bit work cost more than it saved versus scalar loop. |
+
+The final retained changes relative to the lead's round-four baseline are **K1 four-byte packed latency records and K2 512-record hour blocks**. All other probes were reverted. The original pool size (affinity CPU count), output formatting, hour-by-hour counting and percentile selection remain. Acer variance across five runs is nontrivial; decisions compare the whole five-run median and K rather than the fastest individual time.
+
+| Final repeat | Acer median | Peak KB | Official S | Correctness | Observation |
+|---|---:|---:|---:|---|---|
+| K1+K2 unchanged, after reverting all experiments | **0.083 s** (0.070, 0.079, 0.083, 0.084, 0.087) | 28,340 | 298 | all three SHA OK | Under contention; K_acer ~20.5, little above baseline. |
+| Same code, final confirming check | **0.069 s** (0.057, 0.061, 0.069, 0.076, 0.077) | **28,388** | **298** | **all three SHA OK** | Final K_acer ~22.5; paired medians highlight noise rather than a source difference. |
+
+Verbatim final Acer check:
+
+```text
+sample sha OK a-sample/summary.txt
+full sha OK a-full/summary.txt
+full2 (seed 2) sha OK a-full2/summary.txt
+full T median 0.069 s (runs 0.057 0.061 0.069 0.076 0.077)  memory.peak 28388 KB  S 298 (official count)  K_acer~22.5
+```
+
+Baseline checker output verbatim:
+
+```text
+sample sha OK a-sample/summary.txt
+full sha OK a-full/summary.txt
+full2 (seed 2) sha OK a-full2/summary.txt
+full T median 0.085 s (runs 0.081 0.084 0.085 0.086 0.087)  memory.peak 31548 KB  S 283 (official count)  K_acer~20.1
+```
+
 ## Round 4: single-pass rewrite (lead)
 
 Round 3 scanned the file twice (count, then scatter) and its board run was `run-5636c2e5635f`: T 0.05034 s,
