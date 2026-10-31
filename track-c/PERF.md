@@ -1,5 +1,31 @@
 # Track C: performance log
 
+## Round 3 — official Acer seed-1 sample/full and full-size seed 2
+
+| Step | Change | Official checker | Verdict |
+|---|---|---|---|
+| R3-B0 | Unmodified round-2 final source | sample/full/full2 SHA OK; **0.110 s** median (0.106, 0.106, 0.110, 0.111, 0.111); **26,428 KB** peak; S~430; K~**14.6** | baseline. Peak is much higher than earlier 10.8 MB readings despite unchanged source |
+| R3-R1 | Replace two-multiply `mix` with two independent CRC32C hashes but let the low half depend only on the endpoint tail | sample check **never finished**: short names all mapped to a handful of collision clusters, 48 seconds of excessive probing; terminated only this worker's stuck run.bin, no hashes or score claimed | **revert/fix**: key hash must incorporate the head for both the probe index and fingerprint |
+| R3-K1 | Two CRC32C hashes, including the head in the slot-index hash and the tail (rotated) when present | all 3 SHA OK; **0.106 s** (0.101, 0.104, 0.106, 0.109, 0.109), **13,072 KB** peak, S~427, K~17.2; repeat **0.103 s** (0.099, 0.099, 0.103, 0.105, 0.106), **25,140 KB**, K~15.3 | **keep provisionally**: 3–7 ms lower time, S -3. Peak fluctuates dramatically at fixed source |
+| R3-control | Restore original 2-multiply hash with otherwise identical source, checker rerun | all 3 SHA OK; **0.106 s** (0.103, 0.103, 0.106, 0.108, 0.110), **24,720 KB**, S~430, K~15.1 | two-CRC has a small reproducible speed and size win |
+| R3-R2 | Handwritten 32-byte AVX2 quote-mask scanner replacing glibc `memchr` for quoted fields, CRC hash unchanged | all 3 SHA OK; **0.104 s** (0.098, 0.100, 0.104, 0.106, 0.109), **26,124 KB**, S~438, K~15.0 | **revert**: existing glibc vectorized `memchr` is as fast or faster, with 11 fewer lines |
+| R3-R3 | Reduce the CRC interner to one CRC32C hash, used as both slot key and 32-bit fingerprint | all 3 SHA OK; **0.105 s** (0.098, 0.103, 0.105, 0.107, 0.108), **10,972 KB**, S~426, K~17.9; repeat **0.105 s** (0.103, 0.105, 0.105, 0.106, 0.106), **24,752 KB**, K~15.2 | **revert**: half the CRC instructions but ~2 ms slower than K1 repeat; cgroup peak not stable between identical checks |
+| FINAL | Retained two-CRC K1, refreshed README, final canonical three-seed checker | all 3 SHA OK; **0.107 s** (0.103, 0.103, 0.107, 0.109, 0.110), **10,804 KB**, S~427, K~**17.7** | final, not cherry-picked earlier 0.103-s check |
+
+Independent generator/reference gate on the retained final source passed **all three hostile sample seeds** byte-for-byte: seed 7 `4a8b5533b3639d52e4bb82e622c0a03c071e3e4f7ea62c42fcb716d373602958`, seed 13 `5c11825762361abf0966b015d00f16d2d1e1e3557ecf32f4bc8114799e5c7b27`, and seed 29 `b1c04dcb21a44f9eaf55711a2e1a173cb812ff9dde5349a978d5c8c6d35e2aff`. Every canonical checker candidate completed sample/full/full2 SHA gates except the original flawed CRC index, which was explicitly stopped, scored as failure and corrected before the next test.
+
+
+With `SPEED_TIMING=1`, the unchanged source was separately compiled for 1, 2, 4 and 8 workers and run three times under the Acer benchmark lock; all 12 runs produced exactly the official seed-1 full SHA. This is independent, instrumented timing, **not** the official checker:
+
+| Threads | End-to-end Python wall range | Region parse | Record parse | Cut discovery | Output |
+|---|---|---|---|---|---|
+| 1 | 0.442–0.484 s | 1.8–2.2 ms | 432–474 ms | 0.02 ms | 0.27–0.35 ms |
+| 2 | 0.256–0.264 s | 1.8 ms | 246–254 ms | 0.09–0.11 ms | 0.36–0.57 ms |
+| 4 | 0.136–0.146 s | 1.8–1.9 ms | 126–135 ms | 0.15–0.16 ms | 0.38–0.41 ms |
+| 8 | 0.103–0.107 s | 1.8–1.9 ms | 92–96 ms | 0.29–0.37 ms | 0.33–0.35 ms |
+
+The 8-worker parse is ~4.5–5x faster than one thread; throughput slows past four and the residual cost is **inside the CSV parse/name interning/routed distinct-name updates**, not the serial final merge or 240-line output. The code uses byte-at-a-time numeric conversion (no `strtod` or locale), and its common quoted-field delimiter search calls glibc `memchr`, whose implementation is vectorized on Acer's x86. No handwritten AVX2 scanner is yet part of this baseline. The line-count estimate includes Dockerfile; formatted scc remains unavailable.
+
 No live-board run was performed by this worker. The project rules forbid signing in or submitting, and the requested remote Acer route uses SSH, which the worker's standing instruction forbids. Local Mac terminal execution was also blocked by the Chat On Steroids retained-session cap while this track was being built. The measurements below are from an x86 Linux cloud container and are iteration evidence only, not contest-machine numbers.
 
 | Step | Change | Run ID | T (s) | M (MB) | Result |

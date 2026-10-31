@@ -1,5 +1,54 @@
 # Track A performance log
 
+## Round 3 — official Acer checks (sample, full, and independent full seed 2)
+
+All figures use the lead's unchanged `flock ... check1.sh a <src>` command; the full2 SHA check is now mandatory. Host load produces large timing variation (notably 0.075–0.130 s inside five-run checks), so changes are not claimed on one cherry-picked run. The source began as round 2 K12, with its full log retained below.
+
+| R3 step | Single change | Official check output, condensed | Decision |
+|---|---|---|---|
+| B0 | Unchanged round-2 K12 on the new 3-seed checker | sample/full/full2 SHA OK; median **0.121 s** (0.086, 0.103, 0.121, 0.124, 0.130), peak **25,004 KB**, S~320, K~**17.3** | baseline |
+| K1 | Combine per-hour percentile selection and output formatting on workers; concurrently write completed hours in strict order, bound queued hours to twice worker count | all 3 SHA OK; median **0.102 s** (0.075, 0.098, 0.102, 0.102, 0.107), peak **29,048 KB**, S~320, K~**18.3** | **keep provisionally**: 19 ms saved, +4 MB peak, K +1.0; repeated check below |
+| R1 | Cap pending formatted hours to one worker count (instead of two) | all 3 SHA OK; median **0.108 s** (0.076, 0.091, 0.108, 0.118, 0.120), peak **28,460 KB**, S~320, K~**17.9** | **revert**: lower peak did not offset slower result |
+| K1 repeat | Restored 2×worker cap, no other changes | all 3 SHA OK; median **0.111 s** (0.109, 0.110, 0.111, 0.112, 0.115), peak **28,716 KB**, S~320, K~**17.6** | retained, but K gain over B0 is noise-sensitive |
+| K2 | In first parsing pass, use one 16-byte SSE newline mask and trailing-zero index instead of a byte-at-a-time latency skip; terminal tail retains scalar fallback | all 3 SHA OK; median **0.091 s** (0.077, 0.088, 0.091, 0.100, 0.106), peak **29,220 KB**, S~326, K~**19.3** | **keep**; 20 ms lower than the immediately preceding K1 repeat |
+| R2 | Decode pass-2 latencies with SIMD newline-length discovery and SWAR eight-digit decimal folding, including 9/10-digit fallbacks | all 3 SHA OK; median **0.103 s** (0.087, 0.091, 0.103, 0.103, 0.109), peak **29,176 KB**, S~349, K~**18.0** | **revert**, +23 lines and slower |
+| K2 repeat | Restore scalar pass-2 decimal parser; keep pass-1 SSE | all 3 SHA OK; median **0.095 s** (0.079, 0.090, 0.095, 0.101, 0.105), peak **29,312 KB**, S~326, K~**18.9** | **retained**; stable speed gain despite load variation |
+| R3 | In pass 2 find newline with SSE and run a counted decimal-conversion loop | all 3 SHA OK; median **0.106 s** (0.092, 0.106, 0.106, 0.107, 0.108), peak **29,220 KB**, S~335, K~**17.8** | **revert**: extra SIMD work costs more than it saves |
+| R4 | Reuse parser threads across both passes with a C++20 barrier instead of joining/spawning twice | all 3 SHA OK; median **0.116 s** (0.103, 0.108, 0.116, 0.118, 0.128), peak **29,324 KB**, S~328, K~**17.0**; repeated median **0.112 s** (0.091, 0.108, 0.112, 0.117, 0.122), peak **28,808 KB**, K~17.4 | **revert**: the two barrier cycles under contention are slower than recreation |
+| R5 | Special-case 1-, 2- and 3-record groups with fixed compare/swap networks | all 3 SHA OK; median **0.099 s** (0.087, 0.090, 0.099, 0.100, 0.103), peak **28,884 KB**, S~341, K~**18.4** | **revert**: code-size cost outweighs noisy time |
+| R6 | Shrink shared endpoint hash slots from 8,192 to 4,096 | all 3 SHA OK; median **0.106 s** (0.087, 0.103, 0.106, 0.109, 0.112), peak **29,248 KB**, S~326, K~**17.9** | **revert**: probing costs more |
+| R7 | Grow shared endpoint hash slots from 8,192 to 16,384 | all 3 SHA OK; median **0.103 s** (0.082, 0.084, 0.103, 0.112, 0.114), peak **29,368 KB**, S~326, K~**18.1** | **revert**: larger table is not faster |
+| R8 | Replace two file scans with one parse into 8-byte (group, latency) request records, then scatter from the in-memory records | all 3 SHA OK; median **0.109 s** (0.107, 0.107, 0.109, 0.110, 0.111), peak **42,508 KB**, S~316, K~**16.4** | **revert**: extra writes/memory cost more than rescanning mmap; source saved under `../variants/onepass.cpp` |
+| FINAL | Restored retained K2; refreshed README and reran the checker | all 3 SHA OK; median **0.101 s** (0.088, 0.093, 0.101, 0.102, 0.103), peak **29,152 KB**, S~326, K~**18.3** | **final**, not the fastest of several noisy checks |
+
+Independent generator/oracle checks on Acer, in this worker's own directory, also passed after K2 was restored: sample seed 7 was byte-identical to the official Python reference at SHA-256 `39bfccc5334c93cbe0c762f5e6c3300e91ca2e266567561da3176c038cee49f7`; sample seed 11 at `a81124d584b7a8e438b143a08fd045b7799c2ced3343a80825c9c479b9fd5c66`. The checker also passed independent full-sized seed 2 for *every* candidate.
+
+The final saved source is `main.cpp` after R8 was reverted, identical to `../variants/k2.cpp`. The checker provides an **as-written** source estimate (S~326), not official post-clang-format/scc S. The static-tools Docker image is unavailable on these hosts, so exact official S is not claimed.
+
+### Eight-thread mmap floor and phase profile
+
+The `../floor.cpp` standalone 20-line input-byte summation test maps the same 238.8 MB full input and sums every unsigned byte across N threads, checksum **17,368,420,572** on every run. It uses no endpoint parsing, hashing, sorting or formatting. Five measurements on Acer under the benchmark lock:
+
+| Threads | mmap (roughly) | Scan+sum seconds (five runs) |
+|---|---:|---|
+| 1 | 0.005–0.009 ms | 0.0978, 0.0878, 0.0908, 0.0904, 0.0903 |
+| 2 | 0.004–0.005 ms | 0.0320, 0.0321, 0.0318, 0.0319, 0.0318 |
+| 4 | 0.004–0.008 ms | 0.0170, 0.0172, 0.0187, 0.0219, 0.0304 |
+| 8 | 0.008–0.009 ms | 0.0247, 0.0267, 0.0282, 0.0269, 0.0277 |
+
+4 threads reach about 5× the single-thread throughput; 8 threads lose to 4 here, suggesting the floor is dominated by cache/memory traffic and SMT scheduling rather than a mutex. The real two-pass Track A benefits from 8 threads because it does substantially more CPU work per byte.
+
+Temporary phase-instrumented *unchanged round-2* `../profile.cpp` (outside the submission; all runs on the same Acer full file) gave these representative times in ms:
+
+| Threads | map/open | first scan+parse | merge + prefix | second scan+scatter | percentile | serial format | write | total |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 0.03 | 139–150 | 0.75–0.84 | 105–130 | 63–64 | 25–28 | 4.8–5.6 | 342–370 |
+| 2 | 0.03 | 76–79 | 0.77–0.79 | 53–54 | 23.8–23.9 | 18–21 | 3.3–4.0 | 177–179 |
+| 4 | 0.02–0.03 | 31–50 | 1.1–1.8 | 30–48 | 12.6–17.8 | 18–19 | 3.3–3.6 | 95–140 |
+| 8 | 0.02–0.03 | 22–38 | 1.8–3.2 | 29–35 | 9.4–14.0 | 18–28 | 3.3–5.5 | 84–125 |
+
+At 8 threads the two input scans together consume roughly 51–73 ms, with a 25–28 ms byte-sum floor for *one* scan. The separate serial output formatting costs another 18–28 ms, so K1 parallelizes formatting alongside percentile selection while writing in sorted hour order. No segment is falsely called `mmap` time: actual memory-map/open startup is negligible; mapping fault and reading costs accrue to scan time.
+
 ## Round 2 — official Acer measurements
 
 All round-2 timings below come from the lead's official `check1.sh` command under `flock`, unless a row is explicitly labelled as phase instrumentation. Every kept/reverted optimization is judged against the exact sample and full SHA checks printed by that command.

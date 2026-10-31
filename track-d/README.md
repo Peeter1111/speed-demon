@@ -28,15 +28,17 @@ Per-direction tentative distances live in 65,536-slot open-addressed hash
 tables rather than dense 1.74M-vertex arrays. The normal value occupies
 16 bits, with larger distances spilled into a lazily touched 64-bit array.
 Each entry stores an epoch tag; tags are cleared after epoch 2,047.
+If a query reaches 65,535 distinct discovered vertices on a side, that side
+switches to an exact dense distance table, migrating all existing distances.
+Dense tables are allocated only if the fallback is actually needed and reused
+with epoch tags. This guarantees termination instead of probing forever when
+the sparse table is nearly full, without paying the memory cost on normal runs.
 Distinct duplicate queries are answered once, then copied into the
 required original order. All arithmetic for path lengths uses 64 bits.
 
-The fixed sparse capacity was chosen from measured full and extra-seed
-workloads. It is not a formal upper bound for arbitrary directed graphs:
-a query discovering 65,536 distinct vertices on one side could exhaust a
-table. A dynamic-resize variant was tested and passed official hashes,
-but reduced measured K, so the benchmarked faster variant was retained.
-That is a residual holdout-correctness risk, not a proven guarantee.
+This fallback was exercised on two adversarial graphs of 160,000 and
+180,000 vertices, where both search sides discover over 65,535 vertices,
+as well as an independently checked 2,300-query epoch-rollover test.
 
 ## Build and verification
 
@@ -50,17 +52,18 @@ g++ -std=c++20 -O3 -march=x86-64-v3 -pthread -DNDEBUG -static-libstdc++ -static-
 ```
 
 `SD_THREADS=N` selects the query-worker count; `SD_PROFILE=1` prints
-separate parse and search durations to stderr.
+parse, CSR construction and search/query durations to stderr.
 
 Official Acer Linux checks matched the Python reference's SHA-256 on
 seed-1 sample and full, including after the final optimisations.
 Additional independent sample seeds 9–18 also matched fresh references;
 earlier round-1 random-graph differential testing passed 100 small graphs.
-The final eight-worker code ran in approximately 0.94 s and used 117 MB
+The round-two eight-worker code ran in approximately 0.94 s and used 117 MB
 cgroup peak memory in the official five-run Acer check. These are Acer
-numbers, not scoring-box measurements.
+numbers, not scoring-box measurements and not measurements of the changed
+round-three fallback code. Local Apple Silicon checks are recorded in PERF.md.
 
 See PERF.md for kept/reverted optimisations, timings, and their provenance.
-With more time, profile the official i5-13500 scoring CPU, build the
-offline Docker image, and develop a fast zero-regression sparse-table growth
-fallback for unexpectedly large search regions.
+With more time, profile the official i5-13500 scoring CPU, build the offline
+Docker image, and assess whether topology-based CSR relabelling beats its
+extra construction time and memory in the actual scoring environment.

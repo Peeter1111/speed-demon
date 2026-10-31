@@ -77,3 +77,35 @@ After the third retained Round 2 change, extra sample seeds were regenerated and
 After the next three retained changes (positive cache, two-bit Bloom rejection, and the final dense cutoff), the same seed-7 and seed-11 samples were re-run with the final source. They again matched the reference hashes above byte-for-byte.
 
 Profiling the baseline on Acer (instrumented copy, not the submission) showed the dominant full-run phase clearly: query parse 9-12 ms, setup 4-7 ms, index build 605-625 ms, query wall 86-88 ms, output 5-6 ms. Inside index build, corpus scan/tokenize/index insertion was 527-544 ms, phrase-position layout/merge 10-12 ms, and sparse-posting layout/merge 68-74 ms. Summed worker CPU time during the query wall was roughly 456-463 ms for BOOL and 224-228 ms for PHRASE. This made corpus scan the first optimization target.
+
+## Round 3: independent local-only experiment log
+
+**Evidence limitation.** The job reported a fresher Round 2 Acer check of **0.694 s**, **99.4 MB** `memory.peak`, **S≈359**, **K_acer≈13.4** (reported by the lead, not remeasured here). Round 3 was **not** sent to Acer or run through `check1.sh`: this worker's instructions prohibit SSH, even though the contest job brief otherwise expects an Acer check. All Round 3 timings below are **MEASURED on the ARM64 Mac using Apple clang, a scalar fallback for the AVX2 scan, and process wall time**. Neither absolute time, memory nor derived K is comparable to the official Linux/x86 numbers. Time varied with concurrent Mac load, so changes were compared in interleaved adjacent sequences when possible. All tested variants below compiled and passed the five existing SHA datasets unless otherwise stated.
+
+| Experiment | Measured local full-seed-1 median (s), first five runs | Outcome |
+|---|---:|---|
+| R3 baseline, unmodified Round 2 with scalar build fallback | 0.31669 | Baseline; five existing seed checks OK |
+| R3-1, rehash only terms actually indexed (prune 6,515 of 75,747 terms in seed 1) | 0.31074 | **Reverted**: interleaved seed-1 medians 0.29176 vs baseline 0.29200 (tie), but seed-2 full 0.31087 vs baseline 0.29073; extra code did not justify itself |
+| R3-2, remove two-bit Bloom rejector | 0.33191 | **Reverted**: interleaved seed-1 median 0.30023 vs pruned 0.29176 |
+| R3-3, separate exact 1-to-8-byte token key table | 0.41272 | **Reverted**: large random table traffic overwhelmed eliminated byte comparisons |
+| R3-4, pack posting/phrase/dense actions into one 32-bit scan metadata lookup | 0.30012 | **Kept**: interleaved seed-1 0.29506 vs pruned 0.30697; seed-2 full 0.28104 vs Round 2 baseline 0.29073; positive but small/noisy |
+| R3-5, four-slot hash buckets with overflow fallback | 0.31551 | **Reverted**: full seed 7 0.41344 vs the metadata variant 0.30606 in initial checks; more code and memory |
+| R3-6, remove dictionary pruning, retain compact metadata | 0.28561 | **Kept**: 12-cycle interleaved seed 7 0.29724 vs baseline 0.30233; seed 1 0.28153 vs baseline 0.27406 (mixed). Less source than pruned version |
+| R3-7, specialize to published size bounds; drop unused slow phrase fallback and temporary arrays | 0.30537 | **Final**: preserves all six SHA checks, saves 13 nonblank noncomment C++ lines vs Round 2, and reduces temporary scan-array lifetime; no demonstrated large time gain |
+
+Final R3-7 *interleaved* local measurements, 12 full executions per variant and seed, with alternating order (seconds): **seed 1 baseline 0.298937 vs R3-7 0.300058; seed 7 baseline 0.286273 vs R3-7 0.281454; seed 2 baseline 0.280486 vs R3-7 0.285020**. These medians do **not** demonstrate a material 2x scan improvement; one seed improved modestly and two were slightly slower. Accepting the final variant is based on the simpler smaller source and reducing scattered scan metadata loads, **pending** the official check. On seed 2 full, Mac `/usr/bin/time -l` independently reported maximum RSS **372,654,080 bytes** for the baseline vs **372,621,312 bytes** for R3-7, effectively unchanged and not the Linux cgroup metric. Approximate source count: baseline **359** nonblank, noncomment C++ lines vs final **346**, plus seven nonblank Dockerfile lines; **scc** was unavailable.
+
+### Round 3 correctness
+
+The final scalar-fallback binary was compiled on macOS and output hashes checked against official reference output for all five existing datasets:
+
+| Dataset | Expected and obtained SHA-256 | Result |
+|---|---|---|
+| seed 1 sample | `eeeec1e9319da98a6f3c664c78f93e7078fd603c25c2bb3027174e81e3638a8f` | PASS |
+| seed 1 full | `f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927` | PASS |
+| seed 7 sample | `7f41992e4446b5b88cf7a46ca6bae971f5bafb7984208164c3be3d6dda5c4139` | PASS |
+| seed 7 full | `a5a568281ee327b54011c43ac63e971b7a344948f58be60ee57ff07ef50f9c0a` | PASS |
+| seed 11 sample | `762883fd099a7a153931756ce3ec58050c21a411800575f8e83f807edfcc6d0e` | PASS |
+| **seed 2 full** (newly generated) | `7f224ef65795253d56911fa8f25553a8fd0a2cef4addc7bd411e40e8da990869` | PASS vs independently run official Python reference |
+
+Full seed 2 was generated from the unmodified official generator with `--seed 2 --scale full`; the generator printed 250,000 docs, 251,351,689 corpus bytes, 50,000 queries and 609,816 distinct tokens. The Python official reference was run separately, and the final R3-7 file was byte-identical. The final source also **compiled** for `x86_64 -march=x86-64-v3` using Apple clang to check the AVX2 branch, but that is not a Linux GCC 15 build or a performance run. No official Acer `memory.peak`, serialized five-run median or K score for Round 3 exists; do not promote this variant solely on these Mac measurements.

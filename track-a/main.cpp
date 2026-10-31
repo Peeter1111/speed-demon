@@ -111,7 +111,13 @@ static void first_pass(const char *begin, const char *end, uint16_t *counts,
         const uint16_t eid = intern_endpoint(table, ep, len);
         const bool error = q[1] == '5';
         q += 5; // SP + 3 status digits + SP
-        while (*q != '\n') ++q;
+        if (q + 16 <= end) {
+            const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(q));
+            q += __builtin_ctz(static_cast<unsigned>(_mm_movemask_epi8(
+                _mm_cmpeq_epi8(v, _mm_set1_epi8('\n')))));
+        } else {
+            while (*q != '\n') ++q;
+        }
         const uint32_t group = (static_cast<uint32_t>(hour) << 11) | eid;
         ++counts[group];
         if (error) __atomic_fetch_add(errors + group, 1u, __ATOMIC_RELAXED);
@@ -284,52 +290,52 @@ int main(int argc, char **argv) {
         std::snprintf(hours[h], sizeof hours[h], "2026-%02u-%02uT%02u:00:00Z", month, day, hour);
     }
 
-    std::atomic<uint32_t> next_hour{0};
-    pool.reserve(threads);
+    const int ofd = ::open(output.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (ofd < 0) { std::perror("open summary.txt"); return 2; }
+    std::atomic<uint32_t> next_hour{0}, written_hour{0};
+    std::array<std::atomic<bool>, 72> ready{};
+    std::array<std::string, 72> output_hours;
+    pool.clear();
     for (unsigned t = 0; t < threads; ++t) pool.emplace_back([&] {
         for (;;) {
             const uint32_t h = next_hour.fetch_add(1, std::memory_order_relaxed);
             if (h >= 72) break;
+            // Bound outstanding formatted data while the writer preserves hour order.
+            while (h >= written_hour.load(std::memory_order_acquire) + 2 * threads)
+                ::sched_yield();
+            std::string out;
+            out.reserve(180000);
             for (uint32_t k = 0; k < E; ++k) {
                 const uint16_t e = endpoint_order[k];
                 const uint32_t g = (h << 11) | e;
                 const uint32_t n = offsets[g + 1] - offsets[g];
                 if (!n) continue;
                 uint32_t a50, a95, a99;
-                select3(latencies.data() + offsets[g], n, a50, a95, a99);
+                uint32_t *a = latencies.data() + offsets[g];
+                select3(a, n, a50, a95, a99);
+                out.append(hours[h], 20); out.push_back(' ');
+                out.append(endpoint_table.endpoints[e].p, endpoint_table.endpoints[e].len); out.push_back(' ');
+                append_u32(out, n); out.push_back(' ');
+                append_u32(out, a50); out.push_back(' ');
+                append_u32(out, a95); out.push_back(' ');
+                append_u32(out, a99); out.push_back(' ');
+                append_u32(out, errors[g]); out.push_back(' ');
+                append_u32(out, static_cast<uint32_t>(static_cast<uint64_t>(errors[g]) * 1000000u / n));
+                out.push_back('\n');
             }
+            output_hours[h] = std::move(out);
+            ready[h].store(true, std::memory_order_release);
         }
     });
-    for (auto &t : pool) t.join();
-
-    const int ofd = ::open(output.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (ofd < 0) { std::perror("open summary.txt"); return 2; }
     int rc = 0;
-    std::string out;
-    out.reserve(180000);
-    for (uint32_t h = 0; h < 72 && !rc; ++h) {
-        out.clear();
-        for (uint32_t k = 0; k < E; ++k) {
-            const uint16_t e = endpoint_order[k];
-            const uint32_t g = (h << 11) | e;
-            const uint32_t n = offsets[g + 1] - offsets[g];
-            if (!n) continue;
-            const uint32_t *a = latencies.data() + offsets[g];
-            const uint32_t a50 = a[(50u * n + 99u) / 100u - 1u];
-            const uint32_t a95 = a[(95u * n + 99u) / 100u - 1u];
-            const uint32_t a99 = a[(99u * n + 99u) / 100u - 1u];
-            out.append(hours[h], 20); out.push_back(' ');
-            out.append(endpoint_table.endpoints[e].p, endpoint_table.endpoints[e].len); out.push_back(' ');
-            append_u32(out, n); out.push_back(' ');
-            append_u32(out, a50); out.push_back(' ');
-            append_u32(out, a95); out.push_back(' ');
-            append_u32(out, a99); out.push_back(' ');
-            append_u32(out, errors[g]); out.push_back(' ');
-            append_u32(out, static_cast<uint32_t>(static_cast<uint64_t>(errors[g]) * 1000000u / n));
-            out.push_back('\n');
-        }
-        if (write_all(ofd, out.data(), out.size())) rc = -1;
+    for (uint32_t h = 0; h < 72; ++h) {
+        while (!ready[h].load(std::memory_order_acquire)) ::sched_yield();
+        auto &out = output_hours[h];
+        if (!rc && write_all(ofd, out.data(), out.size())) rc = -1;
+        std::string().swap(out);
+        written_hour.store(h + 1, std::memory_order_release);
     }
+    for (auto &t : pool) t.join();
     if (rc) std::perror("write summary.txt");
     ::close(ofd);
     ::munmap(const_cast<char *>(data), size);

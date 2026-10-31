@@ -151,3 +151,74 @@ queries each passed an independent Mac Dijkstra oracle, including large
 uint32 weights, zeroes, loops, unreachable pairs and repeated queries.
 No Docker image, official scoring-machine result, or contest submission
 has been checked by this worker.
+
+## Round 3: exact overflow fallback and local verification (Oct 31)
+
+The round-two source above is the unchanged starting point, including the
+failed 2^17 sparse-table, Dial, radix, parallel-CSR and adaptive-frontier
+experiments: **none of those experiments was repeated**. The round-two
+official Acer best, **0.938 s / 117,136 KB**, is historical and must not be
+reported as a round-three measurement. In this session SSH to any server was
+prohibited by the controlling user instruction, so there is **no round-three
+Acer check or cgroup memory reading**. All numbers below are measured on
+the local Apple Silicon Mac, not on the scoring CPU, and cannot be used to
+calculate the official contest K.
+
+### Baseline phase split, first task
+
+Instrumented the *unchanged search/CSR algorithm* with timestamps around
+the mmap/newline-aligned parser, degree count and CSR scatter, and query
+processing. On seed-17 **sample**, the initial local run measured:
+**parse 0.007377 s; CSR build 0.003610 s; search/queries 0.018951 s**.
+After generating the exact published seed-1 full inputs locally (verified
+their graph and query SHA-256 against the spec), the first full run of the
+new source measured **parse 0.053019 s, CSR 0.075828 s, search/queries
+0.446797 s**. Repeated warmed full-size runs were much faster; the medians
+below are the more comparable local readings. The search/queries phase
+includes query parsing, deduplication, worker startup and searching.
+
+### Change log (paired, 8 full runs per implementation and seed on Mac)
+
+| Trial | Full seed 1 median wall | Full seed 2 median wall | Result |
+|---|---:|---:|---|
+| Round-2 original code, compiled with local Apple Clang -O3 | 0.263816 s | 0.263751 s | Comparison baseline, all published/ref SHA OK |
+| **Round-3 dense fallback at 65,535 entries**, 16-bit compact fast path | **0.274408 s** | **0.279224 s** | **Kept for correctness**. Full reference hashes match; Mac wall +4.0% / +5.9%, no Acer time. Worst-case sparse-table hang removed. |
+| Branch prediction hints for unlikely dense path vs exact same round-3 source without hints | 0.276022 vs 0.283844 s | 0.287334 vs 0.278387 s | **Reverted**. Opposite seed-level results, no reproducible win. |
+
+For the final fallback source, an isolated warmed full seed-1 run printed
+parse **0.023820 s**, CSR **0.061638 s**, search/queries **0.187581 s**;
+full seed 2 printed **0.024331 / 0.064405 / 0.177770 s**. In the paired
+eight-run seed-1 comparison, the measured median Mac process RSS was
+approximately 217.7 MB for round two versus 217.9 MB for round three;
+seed 2 was 215.0 MB versus 212.4 MB. This is *Mac peak RSS*, not the
+cgroup memory.peak used for scoring.
+
+The fallback moves to epoch-tagged dense distance storage only when a
+direction has inserted 65,535 unique nodes, and migrates the current
+sparse records. The sparse table never fills up and lookups never spin
+indefinitely. Dense memory is lazily allocated per search worker/direction.
+No new runtime dependency was added. Source length including Dockerfile and
+TOML is about **368 nonblank/noncomment lines**, not an official formatted
+SCC line count (the round-two estimate was ~330).
+
+### Correctness checks, all measured locally
+
+| Input | SHA-256 of distances.txt | Comparison |
+|---|---|---|
+| Seed 1 full, 5,000,000 edges, 2,000 queries | `a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e` | Published official reference, exact |
+| Seed 2 full, 5,000,000 edges, 2,000 queries | `23d60c06b8e2c6086f765e4a9a3640306c3bf8199149fd39b20e1ef56b3b8a4b` | Fresh local Python reference, exact |
+| Seed 17 sample | `1c03f6046d75ef9a4e1f5d4cac506904424c56082b559706effeb639b2eac387` | Existing round-two Python reference, exact |
+| Seed 18 sample | `1b5e023631559af75b48e14bc3ed7258f603070ad20d61d9b518fb6b3c170293` | Existing round-two Python reference, exact |
+| Two disjoint 90k directed rings, 2,051 queries; dense fallback before/after epoch rollover | `319139fc9f0772edbcf88ae907aea054001cf4eb3ef27243f9340fe6091bea63` | Analytic `-1`/1 expected output, exact |
+| 160k directed chain, 17 queries, eight workers overflowing simultaneously | `a28f46fe929dbe5833787155f339977d9591bc7891f69d0ee9956da4b3364a73` | Exact path lengths, exact |
+| 80-node weighted random graph, 2,300 unique queries, 32-bit max weights | `18512b83146b406b9755cb963a99c34fbcf4f46af74b808da4cc5d2f69e82ded` | Independent Python Dijkstra oracle, exact |
+
+Code changes after the last hint experiment were reverted to the measured
+fallback. Rebuilt and reran both full references successfully. The official
+two-stage Dockerfile, digest pins, C++20 compiler flags and packaging were
+preserved unchanged. No Docker or Linux test was possible locally, and no
+official scoring submission was made. The BFS/ID-locality reorder was not
+implemented: source IDs are deliberately randomized, a reindex requires
+full forward/reverse CSR reconstruction, and it would add both peak memory
+and an O(n+m) preprocessing pass, which cannot be justified without a
+Linux score measurement.

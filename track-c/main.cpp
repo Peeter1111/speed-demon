@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <nmmintrin.h>
 #include <string>
 #include <string_view>
 #include <sys/mman.h>
@@ -72,20 +73,15 @@ Queue queues[THREADS][THREADS];
 alignas(64) uint32_t owner_distinct[THREADS][256];
 std::atomic<bool> producer_done[THREADS];
 
-inline uint64_t mix(uint64_t x) {
-    x ^= x >> 32;
-    x *= 0xd6e8feb86659fd93ULL;
-    x ^= x >> 32;
-    x *= 0xd6e8feb86659fd93ULL;
-    return x ^ (x >> 32);
-}
-
 inline uint64_t hash_bytes(const unsigned char* p, uint32_t n) {
-    uint64_t a = 0, b = n * 0x9e3779b97f4a7c15ULL;
+    uint64_t a = 0, b = 0;
     uint32_t k = std::min(n, 8u);
     if (k) std::memcpy(&a, p, k);
     if (n > 8) std::memcpy(&b, p + n - 8, 8);
-    return mix(a ^ b ^ (static_cast<uint64_t>(n) << 32));
+    const uint32_t hi = static_cast<uint32_t>(_mm_crc32_u64(0x9e3779b97f4a7c15ULL ^ n, a));
+    const uint64_t folded = a ^ ((b << 13) | (b >> 51));
+    const uint32_t lo = static_cast<uint32_t>(_mm_crc32_u64(0xd6e8feb86659fd93ULL ^ n, folded));
+    return (static_cast<uint64_t>(hi) << 32) | lo;
 }
 
 inline uint64_t parse_uint(const unsigned char*& p, unsigned char stop) {

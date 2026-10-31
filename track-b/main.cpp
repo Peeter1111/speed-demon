@@ -6,7 +6,9 @@
 #include <cstring>
 #include <fcntl.h>
 #include <functional>
+#ifdef __AVX2__
 #include <immintrin.h>
+#endif
 #include <memory>
 #include <string>
 #include <sys/mman.h>
@@ -39,10 +41,14 @@ static inline bool word(unsigned char c) {
   return (c >= '0' && c <= '9') || (x >= 'a' && x <= 'z');
 }
 static inline u32 wordmask32(const char *p) {
+#ifdef __AVX2__
   __m256i v=_mm256_loadu_si256((const __m256i*)p),l=_mm256_or_si256(v,_mm256_set1_epi8(32));
   __m256i a=_mm256_and_si256(_mm256_cmpgt_epi8(l,_mm256_set1_epi8('a'-1)),_mm256_cmpgt_epi8(_mm256_set1_epi8('z'+1),l));
   __m256i d=_mm256_and_si256(_mm256_cmpgt_epi8(v,_mm256_set1_epi8('0'-1)),_mm256_cmpgt_epi8(_mm256_set1_epi8('9'+1),v));
   return u32(_mm256_movemask_epi8(_mm256_or_si256(a,d)));
+#else
+  u32 bits=0;for(unsigned j=0;j<32;j++)if(word((unsigned char)p[j]))bits|=u32(1)<<j;return bits;
+#endif
 }
 static inline unsigned char lower_ascii(unsigned char c) {
   return (c >= 'A' && c <= 'Z') ? static_cast<unsigned char>(c + 32) : c;
@@ -165,24 +171,25 @@ struct ThreadBuild {
 };
 
 static void scan_slice(const MMap &docs, const Dict &dict, const char *a, const char *b,
-                       ThreadBuild &tb,std::vector<u64>&span,std::vector<u32>&lineoff,const std::vector<unsigned char>&needpost,
-                       const std::vector<unsigned char>&posflag,const std::vector<u32>&denseid,
-                       const std::vector<u32>&sparseid,std::vector<u64>&densebits,size_t words) {
+                       ThreadBuild &tb,std::vector<u32>&lineoff,
+                       const std::vector<u32>&code,std::vector<u64>&densebits,size_t words) {
   const char *p=a;u32 cache[1024]{};
   while (p<b) {
     u32 id=0; while (p<b && *p>='0'&&*p<='9') id=id*10+u32(*p++-'0');
     if(tb.first==NIL)tb.first=id;
     if (p>=b || *p!='\t') { std::fprintf(stderr,"bad docs line\n"); std::exit(2); }
     const char *s=++p, *e=(const char*)memchr(s,'\n',size_t(b-s)); if (!e) e=b;
-    if (!span.empty()) span[id]=(u64(u32(s-docs.p))<<32)|u32(e-s);
-    if (!lineoff.empty()) lineoff[id]=u32(s-docs.p);
+    lineoff[id]=u32(s-docs.p);
     auto hit=[&](const char*w,const char*z){
         size_t n=size_t(z-w);u64 h=hash_lower(w,n);u32 c=cache[u32(h)&1023],t=NIL;
         if(c&&dict.terms[c-1].sig==u32(h)&&dict.eq(c-1,w,n,true))t=c-1;else if((t=dict.find_folded(w,n,h))!=NIL)cache[u32(h)&1023]=t+1;
-        if(t!=NIL&&posflag[t]){++tb.poscount[t];tb.pos.push_back((u64(t)<<32)|u32(w-docs.p));}
-        if (t!=NIL && needpost[t] && tb.last[t]!=id) {
-          tb.last[t]=id;++tb.count[t];u32 d=denseid[t];if(d!=NIL)densebits[size_t(d)*words+(id>>6)]|=1ULL<<(id&63);
-          else tb.pairs.push_back((u16)sparseid[t]);
+        if(t!=NIL){u32 meta=code[t];
+          if(meta&0x80000000u){++tb.poscount[t];tb.pos.push_back((u64(t)<<32)|u32(w-docs.p));}
+          if((meta&0x40000000u)&&tb.last[t]!=id){
+            tb.last[t]=id;++tb.count[t];u32 index=meta&65535;
+            if(meta&0x20000000u)densebits[size_t(index)*words+(id>>6)]|=1ULL<<(id&63);
+            else tb.pairs.push_back((u16)index);
+          }
         }
     };
     const char*carry=nullptr;
@@ -194,10 +201,9 @@ static void scan_slice(const MMap &docs, const Dict &dict, const char *a, const 
   }
 }
 
-static Index build_index(const MMap &docs, const Dict &dict,std::vector<u64>&span,std::vector<u32>&lineoff,unsigned nt,
-                         const std::vector<unsigned char>&needpost,const std::vector<unsigned char>&posflag,
-                         const std::vector<u32>&denseid,u32 dense_count,const std::vector<u32>&sparseid,
-                         const std::vector<u32>&sparseterm,u32 ndoc) {
+static Index build_index(const MMap &docs, const Dict &dict,std::vector<u32>&lineoff,unsigned nt,
+                       const std::vector<u32>&denseid,u32 dense_count,
+                       const std::vector<u32>&sparseterm,const std::vector<u32>&code,u32 ndoc) {
   size_t words=(ndoc+63)/64;std::vector<u64>densebits(size_t(dense_count)*words);
   std::vector<const char*> cut(nt+1); cut[0]=docs.p; cut[nt]=docs.p+docs.n;
   for (unsigned i=1;i<nt;i++) {
@@ -210,7 +216,7 @@ static Index build_index(const MMap &docs, const Dict &dict,std::vector<u64>&spa
   std::vector<ThreadBuild> tb; tb.reserve(nt);
   for (unsigned i=0;i<nt;i++) tb.emplace_back(dict.terms.size(),size_t(cut[i+1]-cut[i])/20+40000,size_t(cut[i+1]-cut[i])/180+2000);
   std::vector<std::thread> th; th.reserve(nt);
-  for (unsigned i=0;i<nt;i++) th.emplace_back(scan_slice,std::cref(docs),std::cref(dict),cut[i],cut[i+1],std::ref(tb[i]),std::ref(span),std::ref(lineoff),std::cref(needpost),std::cref(posflag),std::cref(denseid),std::cref(sparseid),std::ref(densebits),words);
+  for (unsigned i=0;i<nt;i++) th.emplace_back(scan_slice,std::cref(docs),std::cref(dict),cut[i],cut[i+1],std::ref(tb[i]),std::ref(lineoff),std::cref(code),std::ref(densebits),words);
   for (auto &t:th) t.join();
   Index idx;idx.post.resize(dict.terms.size());idx.denseid=denseid;idx.words=words;
   size_t total=0;
@@ -282,22 +288,6 @@ static Result summarize_op(unsigned char op,List a,List b) {
   return r;
 }
 
-static bool phrase_match(u32 doc,const Query &q,const MMap &docs,const Dict &dict,const std::vector<u64> &span) {
-  u64 sp=span[doc]; const char *p=docs.p+u32(sp>>32), *e=p+u32(sp);
-  u32 ring[8]; const char*rp[8]; unsigned char rl[8]; unsigned seen=0;
-  while (p<e) {
-    while (p<e&&!word((unsigned char)*p)) ++p;
-    const char *w=p;while(p<e&&word((unsigned char)*p))++p;
-    if (p==w) continue;u64 h=hash_lower(w,size_t(p-w));
-    unsigned slot=seen&7;ring[slot]=u32(h);rp[slot]=w;rl[slot]=(unsigned char)(p-w);++seen;
-    if (seen>=q.n) {
-      bool ok=true;for(unsigned j=0;j<q.n;j++)if(ring[(seen-q.n+j)&7]!=dict.terms[q.t[j]].sig){ok=false;break;}
-      if(ok){for(unsigned j=0;j<q.n;j++){unsigned s=(seen-q.n+j)&7;if(!dict.eq(q.t[j],rp[s],rl[s],true)){ok=false;break;}}if(ok)return true;}
-    }
-  }
-  return false;
-}
-
 static bool phrase_at(u32 off,const Query&q,const MMap&docs,const Dict&dict){
   // Verify neighbors directly around an indexed phrase anchor (not merely co-occurrence).
   const char*a=docs.p+off,*p=a,*de=docs.p+docs.n;
@@ -320,21 +310,6 @@ static Result answer_bool(const Query &q,const Index &idx,std::vector<u32>&a,std
   }
   return {};
 }
-static Result answer_phrase(const Query &q,const Index &idx,const MMap &docs,const Dict &dict,const std::vector<u64>&span,
-                            std::vector<u32>&a,std::vector<u32>&b) {
-  unsigned order[8]; for(unsigned i=0;i<q.n;i++)order[i]=i;
-  std::sort(order,order+q.n,[&](unsigned a,unsigned b){return idx.post[q.t[a]].len<idx.post[q.t[b]].len;});
-  List cur=idx.get(q.t[order[0]]);
-  u32 prev=q.t[order[0]]; bool flip=false;
-  for(unsigned z=1;z<q.n;z++){
-    u32 t=q.t[order[z]]; if(t==prev)continue; prev=t;
-    auto &out=flip?b:a; set_inter(cur,idx.get(t),out); cur=as_list(out); flip=!flip; if(!cur.n)break;
-  }
-  Result r;
-  for(u32 i=0;i<cur.n;i++){u32 doc=cur.p[i];if(phrase_match(doc,q,docs,dict,span)){if(r.topn<10)r.top[r.topn++]=doc;++r.count;r.sum+=doc;}}
-  return r;
-}
-
 static Result answer_phrase_pos(const Query&q,const Index&idx,const MMap&docs,const Dict&dict,const std::vector<u32>&lineoff){
   const Posting&p=idx.pospost[q.t[q.anchor]];Result r;u32 skip=0;
   for(u32 i=0;i<p.len;i++){u32 off=idx.posdata[p.off+i];if(off<skip)continue;
@@ -343,12 +318,12 @@ static Result answer_phrase_pos(const Query&q,const Index&idx,const MMap&docs,co
 }
 
 static std::vector<Result> answer_all(const std::vector<Query>&qs,const Index&idx,const MMap&docs,const Dict&dict,
-                                      const std::vector<u64>&span,const std::vector<u32>&lineoff,unsigned nt,bool positions) {
+                                      const std::vector<u32>&lineoff,unsigned nt) {
   std::vector<Result> out(qs.size()); std::atomic<size_t> next{0}; std::vector<std::thread> th;
   for(unsigned z=0;z<nt;z++)th.emplace_back([&]{
     std::vector<u32>a,b;std::vector<u64>bits;
     for(;;){size_t base=next.fetch_add(8,std::memory_order_relaxed);if(base>=qs.size())break;size_t end=std::min(base+8,qs.size());
-      for(size_t i=base;i<end;i++)out[i]=qs[i].phrase?(positions?answer_phrase_pos(qs[i],idx,docs,dict,lineoff):answer_phrase(qs[i],idx,docs,dict,span,a,b)):answer_bool(qs[i],idx,a,b,bits);}
+      for(size_t i=base;i<end;i++)out[i]=qs[i].phrase?answer_phrase_pos(qs[i],idx,docs,dict,lineoff):answer_bool(qs[i],idx,a,b,bits);}
   });
   for(auto&t:th)t.join();return out;
 }
@@ -370,17 +345,29 @@ int main(int argc,char**argv){
   for(auto&q:qs)if(q.phrase){unsigned best=0;for(unsigned j=1;j<q.n;j++){u32 a=q.t[j],b=q.t[best];if(uses[a]<uses[b]||(uses[a]==uses[b]&&dict.terms[a].len>dict.terms[b].len))best=j;}q.anchor=(unsigned char)best;posflag[q.t[best]]=1;}
     else for(unsigned j=0;j<q.n;j++)needpost[q.t[j]]=1;
   MMap docs(data+"/docs.txt"); u32 ndoc=document_count(docs);
-  // Index only one anchor per phrase; 32-bit offsets suffice for the specified corpus.
-  bool positions=docs.n<(1ULL<<32)&&ndoc<(1u<<18)&&dict.terms.size()<(1u<<18);
-  std::vector<u64>span(positions?0:ndoc);
-  std::vector<u32>lineoff(positions?ndoc+1:0);if(positions)lineoff[ndoc]=u32(docs.n);
-  if(!positions){std::fill(needpost.begin(),needpost.end(),1);std::fill(posflag.begin(),posflag.end(),0);}
+  // The specified full-scale corpus fits 32-bit byte offsets and document ids.
+  if(docs.n>=(1ULL<<32)||ndoc>=(1u<<18)||dict.terms.size()>=(1u<<18)){
+    std::fprintf(stderr,"corpus exceeds Track B index bounds\n");return 2;
+  }
+  std::vector<u32>lineoff(ndoc+1);lineoff[ndoc]=u32(docs.n);
   // Frequent boolean query terms use bitmaps; sparse ones use sorted postings.
-  std::vector<u32>denseid(dict.terms.size(),NIL);u32 dense_count=0;for(u32 t=0;t<denseid.size();t++)if(positions&&needpost[t]&&uses[t]>22)denseid[t]=dense_count++;
+  std::vector<u32>denseid(dict.terms.size(),NIL);u32 dense_count=0;for(u32 t=0;t<denseid.size();t++)if(needpost[t]&&uses[t]>22)denseid[t]=dense_count++;
   std::vector<u32>sparseid(dict.terms.size(),NIL),sparseterm;for(u32 t=0;t<sparseid.size();t++)if(needpost[t]&&denseid[t]==NIL){sparseid[t]=(u32)sparseterm.size();sparseterm.push_back(t);}
   if(sparseterm.size()>65536){std::fprintf(stderr,"too many sparse terms\n");return 2;}
+  // One cache-local lookup encodes all scan actions for a recognized token.
+  std::vector<u32>code(dict.terms.size());
+  for(u32 t=0;t<code.size();t++){
+    if(posflag[t])code[t]|=0x80000000u;
+    if(needpost[t])code[t]|=0x40000000u;
+    if(denseid[t]!=NIL)code[t]|=0x20000000u|denseid[t];
+    else if(sparseid[t]!=NIL)code[t]|=sparseid[t];
+  }
+  // These temporary query flags are now represented by one packed scan word.
+  std::vector<unsigned char>().swap(needpost);
+  std::vector<unsigned char>().swap(posflag);
+  std::vector<u32>().swap(sparseid);
   unsigned nt=std::thread::hardware_concurrency(); if(!nt)nt=1; if(nt>12)nt=12;
-  Index idx=build_index(docs,dict,span,lineoff,nt,needpost,posflag,denseid,dense_count,sparseid,sparseterm,ndoc);
-  auto rs=answer_all(qs,idx,docs,dict,span,lineoff,nt,positions);write_results(out,rs);
+  Index idx=build_index(docs,dict,lineoff,nt,denseid,dense_count,sparseterm,code,ndoc);
+  auto rs=answer_all(qs,idx,docs,dict,lineoff,nt);write_results(out,rs);
   return 0;
 }

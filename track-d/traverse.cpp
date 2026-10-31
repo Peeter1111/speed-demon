@@ -57,11 +57,13 @@ static inline U32 number(const char*& p) {
 struct __attribute__((packed)) Edge { U32 low; uint8_t high; };
 struct Graph {
     U32 n;
+    double parse_seconds = 0, csr_seconds = 0;
     std::vector<U32> start[2];
     std::vector<Edge> edges[2];
     std::vector<U32> big[2];
 
     explicit Graph(const std::string& path) {
+        const auto clock_start = std::chrono::steady_clock::now();
         Mapping file(path);
         const char* p = file.data;
         n = number(p);
@@ -97,6 +99,7 @@ struct Graph {
             parse(0);
             for (auto& t : readers) t.join();
         }
+        const auto clock_parsed = std::chrono::steady_clock::now();
         size_t count = 0;
         for (auto& x : chunks) count += x.size();
         if (count != m) throw std::runtime_error("bad edge count");
@@ -136,6 +139,9 @@ struct Graph {
             for (U32 u = 0; u < n; ++u) x[u] |= (x[u + 1] - x[u]) << 23;
             x.resize(n);
         }
+        const auto clock_csr = std::chrono::steady_clock::now();
+        parse_seconds = std::chrono::duration<double>(clock_parsed - clock_start).count();
+        csr_seconds = std::chrono::duration<double>(clock_csr - clock_parsed).count();
     }
 };
 
@@ -182,12 +188,32 @@ struct SparseDist {
     uint16_t* value = static_cast<uint16_t*>(malloc(SIZE * sizeof(uint16_t)));
     U64* large = static_cast<U64*>(malloc(SIZE * sizeof(U64)));
     U32* tag = static_cast<U32*>(calloc(SIZE, sizeof(U32)));
-    SparseDist() { if (!value || !large || !tag) throw std::bad_alloc(); }
+    U32 nodes, used = 0;
+    bool dense = false;
+    std::vector<U64> dense_value;
+    std::vector<U32> dense_epoch;
+    explicit SparseDist(U32 n): nodes(n) { if (!value || !large || !tag) throw std::bad_alloc(); }
     ~SparseDist() { free(value); free(large); free(tag); }
     SparseDist(const SparseDist&) = delete;
     SparseDist& operator=(const SparseDist&) = delete;
     static U32 hash(U32 node) { return node & MASKI; }
+    void begin_query() { dense = false; used = 0; }
+    void grow(U32 epoch) {
+        // Only a pathological query takes this branch. A full open-addressed
+        // table would otherwise loop forever on absent keys on a holdout seed.
+        if (dense_epoch.empty()) {
+            dense_epoch.assign(nodes, 0);
+            dense_value.resize(nodes);
+        }
+        for (U32 i = 0; i < SIZE; ++i) if ((tag[i] >> 21) == epoch) {
+            U32 node = tag[i] & NODE_MASK;
+            dense_epoch[node] = epoch;
+            dense_value[node] = value[i] == UINT16_MAX ? large[i] : value[i];
+        }
+        dense = true;
+    }
     U64 get(U32 node, U32 epoch) const {
+        if (dense) return dense_epoch[node] == epoch ? dense_value[node] : INF;
         U32 want = (epoch << 21) | node, i = hash(node);
         for (;;) {
             U32 seen = tag[i];
@@ -197,13 +223,19 @@ struct SparseDist {
         }
     }
     void put(U32 node, U32 epoch, U64 d) {
-        U32 want = (epoch << 21) | node, i = hash(node);
-        while ((tag[i] >> 21) == epoch && tag[i] != want) i = (i + 1) & MASKI;
-        tag[i] = want;
+        // The sole initial insertion on this side, immediately after begin_query().
+        U32 i = hash(node);
+        tag[i] = (epoch << 21) | node;
+        used = 1;
         if (d < UINT16_MAX) value[i] = static_cast<uint16_t>(d);
         else { value[i] = UINT16_MAX; large[i] = d; }
     }
     bool improve(U32 node, U32 epoch, U64 d) {
+        if (dense) {
+            if (dense_epoch[node] == epoch && dense_value[node] <= d) return false;
+            dense_epoch[node] = epoch; dense_value[node] = d;
+            return true;
+        }
         U32 want = (epoch << 21) | node, i = hash(node);
         for (;;) {
             U32 seen = tag[i];
@@ -211,6 +243,7 @@ struct SparseDist {
                 tag[i] = want;
                 if (d < UINT16_MAX) value[i] = static_cast<uint16_t>(d);
                 else { value[i] = UINT16_MAX; large[i] = d; }
+                if (++used == SIZE - 1) grow(epoch);
                 return true;
             }
             if (seen == want) {
@@ -223,7 +256,10 @@ struct SparseDist {
             i = (i + 1) & MASKI;
         }
     }
-    void reset() { std::memset(tag, 0, SIZE * sizeof(U32)); }
+    void reset() {
+        std::memset(tag, 0, SIZE * sizeof(U32));
+        if (!dense_epoch.empty()) std::fill(dense_epoch.begin(), dense_epoch.end(), 0);
+    }
 };
 
 struct Solver {
@@ -231,7 +267,7 @@ struct Solver {
     SparseDist dist[2];
     Heap heap[2];
     U32 epoch = 0;
-    explicit Solver(const Graph& g): graph(g) {}
+    explicit Solver(const Graph& g): graph(g), dist{SparseDist(g.n), SparseDist(g.n)} {}
     U64 get(int side, U32 node) const {
         return dist[side].get(node, epoch);
     }
@@ -245,6 +281,7 @@ struct Solver {
             for (auto& d : dist) d.reset();
             epoch = 1;
         }
+        for (auto& d : dist) d.begin_query();
         heap[0].clear(); heap[1].clear();
         put(0, s, 0); put(1, t, 0);
         heap[0].push(0, s); heap[1].push(0, t);
@@ -327,8 +364,8 @@ int main(int argc, char** argv) {
         write_answers(std::string(output) + "/distances.txt", answers);
         if (getenv("SD_PROFILE")) {
             using Sec = std::chrono::duration<double>;
-            fprintf(stderr, "parse %.6f s, search %.6f s\n",
-                Sec(parsed-start).count(), Sec(done-parsed).count());
+            fprintf(stderr, "parse %.6f s, CSR %.6f s, search/queries %.6f s\n",
+                g.parse_seconds, g.csr_seconds, Sec(done-parsed).count());
         }
     } catch (const std::exception& e) {
         fprintf(stderr, "traverse: %s\n", e.what());
