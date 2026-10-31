@@ -1,5 +1,25 @@
 # Track A performance log
 
+## Round 4: single-pass rewrite (lead)
+
+Round 3 scanned the file twice (count, then scatter) and its board run was `run-5636c2e5635f`: T 0.05034 s,
+M 31.5 MB, S 407, K 27.8. The round-3 R8 experiment showed that a naive one-pass version with one shared record
+array was slower (0.109 s), because every record crossed threads twice. The rewrite keeps one pass but stores
+records per thread and per hour, so the second phase reads only cache-sized hour slices.
+
+| Step | Change | Acer check (8 threads; sample, full and full seed 2 SHA all OK) | Board |
+|---|---|---|---|
+| A4 | One parse per line into 6-byte records in per-thread, per-hour block chains; barrier merge of endpoint tables into one byte-sorted list; one task per hour does a counting sort by endpoint rank, nearest-rank selection and formatting; ordered streaming write | median **0.084 s**, peak 33,400 KB, K~20.8 | |
+| A4 recheck | Same code, check now counts S the official way (clang-format LLVM, then scc 4.1.0) | median **0.081 s** (0.078, 0.081, 0.081, 0.082, 0.090), peak 33,400 KB, S 276, K~20.4 | `run-c40bb50695d3`: T **0.04029 s**, M 36.7 MB, S 283, K **31.9** (+4.1 K, +3.0 points over round 3) |
+
+Phase profile of A4 on the Acer, six runs: parse 31-56 ms, merge 1.3-2.5 ms, report plus write 14.6-27.9 ms.
+A plain parallel byte sum over the same mapping takes 18.7 ms at 4 threads, so parse is 1.7-3x that floor and
+the report phase is the other half of the time.
+
+Measurement note: round 3's own S estimates were taken before formatting and were far too low (B: 353 written,
+970 counted). The official counter formats each file with `clang-format --style=LLVM` (80 columns) first, so
+long lines are split and dense code does not save lines.
+
 ## Round 3 — official Acer checks (sample, full, and independent full seed 2)
 
 All figures use the lead's unchanged `flock ... check1.sh a <src>` command; the full2 SHA check is now mandatory. Host load produces large timing variation (notably 0.075–0.130 s inside five-run checks), so changes are not claimed on one cherry-picked run. The source began as round 2 K12, with its full log retained below.
