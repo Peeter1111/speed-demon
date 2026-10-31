@@ -1,19 +1,35 @@
-# Track A: Ingest (round 3)
+# Track A: Ingest
 
-The program maps `/data/requests.log` read-only, splits it into newline-aligned partitions, and executes two parallel input passes. Its byte-exact output is `/out/summary.txt`. The provided Dockerfile builds with GCC C++20, `-O3 -march=x86-64-v3 -flto`, and pinned, allowlisted build/runtime images. There are **zero non-standard runtime dependencies**.
+`main.cpp` reads `requests.log` once and writes `summary.txt`. C++20, no dependencies. Paths come from the two
+optional arguments, then `DATA_DIR` / `OUT_DIR`, then `/data` and `/out`. An empty log gives an empty summary.
 
-In pass 1, worker threads decode the fixed Track A UTC-hour window using digit arithmetic, skip the seven fixed HTTP method spellings using byte comparisons, find the endpoint delimiter with AVX2, and intern each *complete* endpoint byte string in one shared 8,192-slot atomic table. Two hardware CRC32C operations accelerate hashing, but exact length and byte comparisons decide identity even for collisions. Each worker keeps a dense, 16-bit per-group count array; rare 5xx counts use one shared 32-bit atomic error array. The latency tail is skipped using a 16-byte SSE newline mask, except at the last mapped bytes where a scalar fallback avoids any out-of-bounds load.
+## Approach
 
-The main thread reduces the count arrays and calculates the scatter ranges. Pass 2 scans the mapping again, now doing read-only endpoint lookup and decimal latency decoding; each worker scatters latencies directly into its non-overlapping portion of the output groups. The same local count cells become its relative scatter cursors. This costs much less memory than retaining an eight-byte record for every request.
+Two phases, both on every hardware thread (the count comes from the CPU affinity mask).
 
-Finally, workers **select the three exact nearest-rank percentiles and format complete hours concurrently**. Small groups use `std::sort`; larger groups use three bounded `std::nth_element` calls. The main thread writes completed hours in required order, with release/acquire readiness flags and a cap of two pending hours per worker. Output stays streaming instead of retaining the full 10 MB result. The format overlaps percentile work with disk writes.
+1. **Parse, once.** The log is mapped read-only and cut into newline-aligned chunks (8 per thread) that threads
+   take from an atomic counter. For each line the hour comes from fixed byte offsets (timestamps are always 27
+   bytes, and the span is the spec's fixed 72 hours), the method length from one 8-byte word, the endpoint end
+   from one AVX2 compare, and the latency from a short digit loop. The endpoint is interned in the thread's own
+   open-addressing table (8,192 slots, hash of the first, middle and last 8 bytes, confirmed with `memcmp`).
+   Each line becomes a 6-byte record, endpoint id with the 5xx flag in its top bit plus the latency, appended to
+   the thread's block chain for that hour. No line is parsed twice.
+2. **Report, per hour.** A barrier merges the per-thread endpoint tables into one list sorted as unsigned bytes
+   and maps every local id to its rank. Threads then take hours from a counter. An hour's records (about 43,000)
+   are counting-sorted by endpoint rank, so groups come out in output order; each group's three nearest-rank
+   values are selected (`std::sort` up to 32 values, three nested `std::nth_element` calls above), and the
+   hour's lines are formatted into one buffer. Blocks are freed as they are consumed. The main thread writes
+   finished hours in order while later hours are still being computed.
 
-The file and output directories can be overridden by positional arguments or `DATA_DIR`/`OUT_DIR`; defaults are `/data` and `/out`. On an empty input the binary writes an empty summary. The implementation is specialized to the official generator's fixed 72-hour window, 1,842 endpoints, and traffic counts fitting 16-bit **per-worker** group cells; global counts and errors are 32-bit. It does not truncate endpoints, treat 499 as 5xx, discard duplicate rows, or use approximate percentiles.
+The design follows from the scoring: time counts most (square root), so the input is scanned once and the
+expensive part (percentiles and formatting) runs in parallel on cache-resident data.
 
-## Evidence
+## Limits
 
-The lead's Acer checker accepts seed-1 sample, seed-1 full, **independent seed-2 full**, and our separately generated seeds 7 and 11 match the official Python oracle at sample scale. All kept and reverted experiments, timings and memory peaks are in `PERF.md`; phase profiles and a separate mmap byte-sum floor are there too. Acer is a noisy eight-thread laptop and is not the competition's twelve-thread scoring box. We report the whole five-run distribution instead of presenting one fast run as a speed guarantee.
+The program checks what it assumes and exits non-zero with a message instead of writing a wrong file: a
+timestamp outside the 72-hour span, more than 6,000 distinct endpoints, a missing final newline.
 
 ## Another 24 hours
 
-The most promising larger change would be a **bounded in-memory chunk pipeline** that overlaps reading and group reduction without paying for 3.1 million retained 8-byte request records. Round 3's direct one-pass record materialization lost badly (0.109 s/42.5 MB). A strong alternative is to eliminate the shared hot endpoint-table probes using an exact, precomputed dictionary for *each seed* without assuming fixed endpoints; its construction cost must be included. Another useful experiment is a radix percentile selector for the handful of large groups. Tuning the endpoint-table capacity, reusing barrier-synchronized threads and adding a SWAR latency parser all regressed, as recorded.
+See PERF.md: the parse phase is within about 1.5x of the Acer's memory-read floor, so the next gains are in the
+report phase (a sorting network for small groups, two-digit formatting tables) and in peak memory.
