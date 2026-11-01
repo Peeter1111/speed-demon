@@ -60,7 +60,6 @@ static inline u64 hash_lower(const char *p, size_t n) {
   else for(size_t i=0;i<n;i++)h^=u32(lower_ascii((unsigned char)p[i]))<<(i*8);
   h^=h>>16;h*=0x7feb352du;h^=h>>15;return h?h:1;
 }
-
 struct Term { const char *p; u32 len, sig; };
 
 struct Dict {
@@ -81,18 +80,17 @@ struct Dict {
   u32 get_or_add(const char *p, size_t n) {
     u64 h=hash_lower(p,n); u32 sig=u32(h); size_t m=tab.size()-1, i=h&m;
     while (tab[i]) {
-      u32 id=tab[i]-1;if (terms[id].sig==sig && eq(id,p,n,false)) return id;
+      u32 x=tab[i],id=(x&0x1ffffu)-1;if ((x>>17)==(sig>>17) && eq(id,p,n,false)) return id;
       i=(i+1)&m;
     }
-    u32 id=(u32)terms.size();terms.push_back({p,(u32)n,sig});tab[i]=id+1;u32 g=sig*0x9e3779b1u;bloom[(h>>6)&(bloom.size()-1)]|=1ULL<<(h&63);bloom[(g>>6)&(bloom.size()-1)]|=1ULL<<(g&63);
+    u32 id=(u32)terms.size();terms.push_back({p,(u32)n,sig});tab[i]=(sig&0xfffe0000u)|(id+1);u32 g=sig*0x9e3779b1u;bloom[(h>>6)&(bloom.size()-1)]|=(1ULL<<(h&63))|(1ULL<<(g&63));
     return id;
   }
   u32 find_folded(const char *p, size_t n, u64 h) const {
-    u32 g=u32(h)*0x9e3779b1u;if(!(bloom[(h>>6)&(bloom.size()-1)]&(1ULL<<(h&63)))||!(bloom[(g>>6)&(bloom.size()-1)]&(1ULL<<(g&63))))return NIL;
-    u32 sig=u32(h);
+    u32 sig=u32(h),g=sig*0x9e3779b1u;u64 bm=(1ULL<<(h&63))|(1ULL<<(g&63));if((bloom[(h>>6)&(bloom.size()-1)]&bm)!=bm)return NIL;
     size_t m=tab.size()-1, i=h&m;
     while (tab[i]) {
-      u32 id=tab[i]-1;if (terms[id].sig==sig && eq(id,p,n,true)) return id;
+      u32 x=tab[i],id=(x&0x1ffffu)-1;if ((x>>17)==(sig>>17) && eq(id,p,n,true)) return id;
       i=(i+1)&m;
     }
     return NIL;
@@ -164,15 +162,15 @@ struct ThreadBuild {
   std::vector<u16> pairs;
   std::vector<u32> ends;
   std::vector<u64> pos;
-  std::vector<u32> count,poscount;
-  std::vector<u32> last;
+  std::vector<u32> seen_count;
+  std::vector<u16> dense_seen;
   u32 first=NIL;
-  ThreadBuild(size_t terms,size_t reserve_pairs,size_t reserve_pos):count(terms),poscount(terms),last(terms,NIL){pairs.reserve(reserve_pairs);ends.reserve(40000);pos.reserve(reserve_pos);}
+  ThreadBuild(size_t dense,size_t reserve_pairs,size_t reserve_pos):dense_seen(dense){pairs.reserve(reserve_pairs);ends.reserve(40000);pos.reserve(reserve_pos);}
 };
 
 static void scan_slice(const MMap &docs, const Dict &dict, const char *a, const char *b,
                        ThreadBuild &tb,std::vector<u32>&lineoff,
-                       const std::vector<u32>&code,std::vector<u64>&densebits,size_t words) {
+                       const std::vector<u32>&code,std::vector<u64>&densebits,u32 sparse_count,size_t words) {
   const char *p=a;u32 cache[1024]{};
   while (p<b) {
     u32 id=0; while (p<b && *p>='0'&&*p<='9') id=id*10+u32(*p++-'0');
@@ -182,12 +180,11 @@ static void scan_slice(const MMap &docs, const Dict &dict, const char *a, const 
     lineoff[id]=u32(s-docs.p);
     auto hit=[&](const char*w,const char*z){
         size_t n=size_t(z-w);u64 h=hash_lower(w,n);u32 c=cache[u32(h)&1023],t=NIL;
-        if(c&&dict.terms[c-1].sig==u32(h)&&dict.eq(c-1,w,n,true))t=c-1;else if((t=dict.find_folded(w,n,h))!=NIL)cache[u32(h)&1023]=t+1;
+        if(c&&(c>>17)==(u32(h)>>17)&&dict.eq((c&0x1ffffu)-1,w,n,true))t=(c&0x1ffffu)-1;else if((t=dict.find_folded(w,n,h))!=NIL)cache[u32(h)&1023]=(u32(h)&0xfffe0000u)|(t+1);
         if(t!=NIL){u32 meta=code[t];
-          if(meta&0x80000000u){++tb.poscount[t];tb.pos.push_back((u64(t)<<32)|u32(w-docs.p));}
-          if((meta&0x40000000u)&&tb.last[t]!=id){
-            tb.last[t]=id;++tb.count[t];u32 index=meta&65535;
-            if(meta&0x20000000u)densebits[size_t(index)*words+(id>>6)]|=1ULL<<(id&63);
+          if(meta&0x80000000u)tb.pos.push_back((u64(t)<<32)|u32(w-docs.p));
+          if(meta&0x40000000u){u32 index=meta&65535;
+            if(meta&0x20000000u){u16 stamp=u16(tb.ends.size()+1);if(tb.dense_seen[index]!=stamp){tb.dense_seen[index]=stamp;densebits[size_t(index)*words+(id>>6)]|=1ULL<<(id&63);}}
             else tb.pairs.push_back((u16)index);
           }
         }
@@ -199,6 +196,7 @@ static void scan_slice(const MMap &docs, const Dict &dict, const char *a, const 
     tb.ends.push_back((u32)tb.pairs.size());
     p=e+(e<b);
   }
+  tb.seen_count.resize(sparse_count);u32 beg=0,out=0;for(size_t m=0;m<tb.ends.size();m++){u32 end=tb.ends[m];u16 stamp=u16(m+1);for(u32 k=beg;k<end;k++){u32 s=tb.pairs[k];u32&sc=tb.seen_count[s];if(u16(sc)!=stamp){sc=(sc&0xffff0000u)+0x10000u+stamp;tb.pairs[out++]=(u16)s;}}tb.ends[m]=out;beg=end;}tb.pairs.resize(out);std::vector<u16>().swap(tb.dense_seen);
 }
 
 static Index build_index(const MMap &docs, const Dict &dict,std::vector<u32>&lineoff,unsigned nt,
@@ -214,24 +212,24 @@ static Index build_index(const MMap &docs, const Dict &dict,std::vector<u32>&lin
     cut[i]=p;
   }
   std::vector<ThreadBuild> tb; tb.reserve(nt);
-  for (unsigned i=0;i<nt;i++) tb.emplace_back(dict.terms.size(),size_t(cut[i+1]-cut[i])/20+40000,size_t(cut[i+1]-cut[i])/180+2000);
+  for (unsigned i=0;i<nt;i++) tb.emplace_back(dense_count,size_t(cut[i+1]-cut[i])/20+40000,size_t(cut[i+1]-cut[i])/180+2000);
   std::vector<std::thread> th; th.reserve(nt);
-  for (unsigned i=0;i<nt;i++) th.emplace_back(scan_slice,std::cref(docs),std::cref(dict),cut[i],cut[i+1],std::ref(tb[i]),std::ref(lineoff),std::cref(code),std::ref(densebits),words);
+  for (unsigned i=0;i<nt;i++) th.emplace_back(scan_slice,std::cref(docs),std::cref(dict),cut[i],cut[i+1],std::ref(tb[i]),std::ref(lineoff),std::cref(code),std::ref(densebits),u32(sparseterm.size()),words);
   for (auto &t:th) t.join();
   Index idx;idx.post.resize(dict.terms.size());idx.denseid=denseid;idx.words=words;
   size_t total=0;
-  for(u32 term=0;term<idx.post.size();term++){
-    u32 n=0;for(unsigned j=0;j<nt;j++)n+=tb[j].count[term];
-    idx.post[term]={u32(total),n};if(denseid[term]==NIL)total+=n;
+  for(u32 s=0;s<sparseterm.size();s++){
+    u32 term=sparseterm[s],n=0;for(unsigned j=0;j<nt;j++)n+=tb[j].seen_count[s]>>16;
+    idx.post[term]={u32(total),n};total+=n;
   }
-  idx.pospost.resize(dict.terms.size());size_t ptotal=0;
-  for(u32 term=0;term<idx.pospost.size();term++){u32 n=0;for(unsigned j=0;j<nt;j++)n+=tb[j].poscount[term];idx.pospost[term]={u32(ptotal),n};ptotal+=n;}
+  idx.pospost.resize(dict.terms.size());std::vector<u32> pc(dict.terms.size());
+  for(auto &x:tb)for(u64 v:x.pos)++pc[u32(v>>32)];size_t ptotal=0;
+  for(u32 term=0;term<idx.pospost.size();term++){u32 n=pc[term];idx.pospost[term]={u32(ptotal),n};pc[term]=u32(ptotal);ptotal+=n;}
   idx.posdata.reset(new u32[ptotal]);
-  for(u32 term=0;term<idx.pospost.size();term++){u32 pos=idx.pospost[term].off;for(unsigned j=0;j<nt;j++){u32 n=tb[j].poscount[term];tb[j].last[term]=pos;pos+=n;}}
-  for(unsigned j=0;j<nt;j++){for(u64 x:tb[j].pos){u32 term=u32(x>>32);idx.posdata[tb[j].last[term]++]=u32(x);}std::vector<u64>().swap(tb[j].pos);}
+  for(unsigned j=0;j<nt;j++){for(u64 x:tb[j].pos){u32 term=u32(x>>32);idx.posdata[pc[term]++]=u32(x);}std::vector<u64>().swap(tb[j].pos);}std::vector<u32>().swap(pc);
+  for(u32 s=0;s<sparseterm.size();s++){u32 term=sparseterm[s],pos=idx.post[term].off;for(unsigned j=0;j<nt;j++){u32 n=tb[j].seen_count[s]>>16;tb[j].seen_count[s]=pos;pos+=n;}}
   idx.data.reset(new u32[total]);
-  for(u32 term=0;term<idx.post.size();term++){u32 pos=idx.post[term].off;for(unsigned j=0;j<nt;j++){u32 n=tb[j].count[term];tb[j].last[term]=pos;pos+=n;}}
-  for(unsigned j=0;j<nt;j++){u32 beg=0;for(size_t m=0;m<tb[j].ends.size();m++){u32 end=tb[j].ends[m],doc=tb[j].first+u32(m);for(u32 k=beg;k<end;k++){u32 term=sparseterm[tb[j].pairs[k]];idx.data[tb[j].last[term]++]=doc;}beg=end;}std::vector<u16>().swap(tb[j].pairs);std::vector<u32>().swap(tb[j].ends);}
+  for(unsigned j=0;j<nt;j++){u32 beg=0;for(size_t m=0;m<tb[j].ends.size();m++){u32 end=tb[j].ends[m],doc=tb[j].first+u32(m);for(u32 k=beg;k<end;k++){u32 slot=tb[j].pairs[k];idx.data[tb[j].seen_count[slot]++]=doc;}beg=end;}std::vector<u32>().swap(tb[j].seen_count);std::vector<u16>().swap(tb[j].pairs);std::vector<u32>().swap(tb[j].ends);}
   idx.dense=std::move(densebits);
   return idx;
 }

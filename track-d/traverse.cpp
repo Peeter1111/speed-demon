@@ -19,7 +19,7 @@ using U32 = uint32_t;
 using U64 = uint64_t;
 constexpr U64 MASK = (U64{1} << 53) - 1;
 constexpr U64 INF = MASK;
-constexpr U32 NODE_MASK = (1U << 21) - 1, START_MASK = (1U << 23) - 1, BIG_FLAG = 1U << 18;
+constexpr U32 NODE_MASK = (1U << 21) - 1, START_MASK = (1U << 23) - 1, BIG_FLAG = 1U << 10;
 
 struct Mapping {
     int fd = -1;
@@ -54,13 +54,13 @@ static inline U32 number(const char*& p) {
     return result;
 }
 
-struct __attribute__((packed)) Edge { U32 low; uint8_t high; };
+using Edge = U32;
 struct Graph {
     U32 n;
     double parse_seconds = 0, csr_seconds = 0;
     std::vector<U32> start[2];
     std::vector<Edge> edges[2];
-    std::vector<U32> big[2];
+    std::vector<std::pair<U32,U32>> big[2];
 
     explicit Graph(const std::string& path) {
         const auto clock_start = std::chrono::steady_clock::now();
@@ -111,30 +111,38 @@ struct Graph {
         for (auto& x : start)
             for (U32 i = 1; i <= n; ++i) x[i] += x[i - 1];
         auto next_f = start[0], next_b = start[1];
-        auto edge = [&](int side, U32 to, U32 w) {
-            U32 field = w < BIG_FLAG ? w : BIG_FLAG | static_cast<U32>(big[side].size());
-            if (w >= BIG_FLAG) big[side].push_back(w);
-            U64 code = U64(to) | (U64(field) << 21);
-            return Edge{static_cast<U32>(code), static_cast<uint8_t>(code >> 32)};
+        auto edge = [&](int side, U32 index, U32 to, U32 w) {
+            if (w >= BIG_FLAG) big[side].emplace_back(index, w);
+            return to | ((w < BIG_FLAG ? w : BIG_FLAG) << 21);
         };
-        edges[0].resize(static_cast<size_t>(m) + 1);
-        for (unsigned i = 0; i < parts; ++i) {
-            size_t bi = 0;
-            for (U64 e : chunks[i]) {
-                U32 u = static_cast<U32>(e) & NODE_MASK, v = static_cast<U32>(e >> 21) & NODE_MASK;
-                U32 w = static_cast<U32>(e >> 42); if (w == WIDE) w = wide[i][bi++];
-                edges[0][next_f[u]++] = edge(0, v, w);
-            }
-        }
         edges[1].resize(static_cast<size_t>(m) + 1);
         for (unsigned i = 0; i < parts; ++i) {
             size_t bi = 0;
             for (U64 e : chunks[i]) {
                 U32 u = static_cast<U32>(e) & NODE_MASK, v = static_cast<U32>(e >> 21) & NODE_MASK;
                 U32 w = static_cast<U32>(e >> 42); if (w == WIDE) w = wide[i][bi++];
-                edges[1][next_b[v]++] = edge(1, u, w);
+                U32 k = next_b[v]++;
+                edges[1][k] = edge(1, k, u, w);
             }
         }
+        for (auto& c : chunks) std::vector<U64>().swap(c);
+        for (auto& c : wide) std::vector<U32>().swap(c);
+        edges[0].resize(static_cast<size_t>(m) + 1);
+        std::sort(big[1].begin(), big[1].end());
+        for (U32 v = 0; v < n; ++v) {
+            for (U32 k = start[1][v]; k < start[1][v + 1]; ++k) {
+                U32 code = edges[1][k];
+                U32 u = code & NODE_MASK, w = code >> 21;
+                if (w == BIG_FLAG) {
+                    auto it = std::lower_bound(big[1].begin(), big[1].end(), k,
+                        [](const auto& x, U32 index) { return x.first < index; });
+                    w = it->second;
+                }
+                U32 j = next_f[u]++;
+                edges[0][j] = edge(0, j, v, w);
+            }
+        }
+        std::sort(big[0].begin(), big[0].end());
         for (auto& x : start) {
             for (U32 u = 0; u < n; ++u) x[u] |= (x[u + 1] - x[u]) << 23;
             x.resize(n);
@@ -142,6 +150,12 @@ struct Graph {
         const auto clock_csr = std::chrono::steady_clock::now();
         parse_seconds = std::chrono::duration<double>(clock_parsed - clock_start).count();
         csr_seconds = std::chrono::duration<double>(clock_csr - clock_parsed).count();
+    }
+    U32 large(int side, U32 index) const {
+        const auto& a = big[side];
+        auto it = std::lower_bound(a.begin(), a.end(), index,
+            [](const auto& x, U32 k) { return x.first < k; });
+        return it->second;
     }
 };
 
@@ -286,30 +300,27 @@ struct Solver {
         put(0, s, 0); put(1, t, 0);
         heap[0].push(0, s); heap[1].push(0, t);
         U64 best = INF;
-        // Alternate directions rather than choosing the smaller distance:
-        // a 2^32-weight source must not force a full reverse-graph scan.
+        // Expand the smaller frontier to balance bidirectional work.
         int side = 0;
         while (!heap[0].empty() && !heap[1].empty()) {
             if (best != INF && heap[0].min() + heap[1].min() >= best) break;
+            side = heap[0].a.size() <= heap[1].a.size() ? 0 : 1;
             Heap& q = heap[side];
             auto [d, u] = q.pop();
-            if (d != get(side, u)) { side ^= 1; continue; }
+            if (d != get(side, u)) continue;
             U64 other = get(side ^ 1, u);
             if (other != INF && d + other < best) best = d + other;
             U32 range = graph.start[side][u], begin = range & START_MASK, end = begin + (range >> 23);
-            const auto* raw = reinterpret_cast<const unsigned char*>(graph.edges[side].data());
             for (U32 k = begin; k < end; ++k) {
-                U64 code; std::memcpy(&code, raw + sizeof(Edge) * k, sizeof(code));
-                code &= (U64{1} << 40) - 1;
-                U32 v = static_cast<U32>(code) & NODE_MASK, w = static_cast<U32>(code >> 21);
-                if (w & BIG_FLAG) w = graph.big[side][w & (BIG_FLAG - 1)];
+                U32 code = graph.edges[side][k];
+                U32 v = code & NODE_MASK, w = code >> 21;
+                if (w == BIG_FLAG) w = graph.large(side, k);
                 U64 nd = d + w;
                 if (nd >= best || !dist[side].improve(v, epoch, nd)) continue;
                 q.push(nd, v);
                 U64 opposite = get(side ^ 1, v);
                 if (opposite != INF && nd + opposite < best) best = nd + opposite;
             }
-            side ^= 1;
         }
         return best == INF ? -1 : static_cast<int64_t>(best);
     }

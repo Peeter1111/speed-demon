@@ -222,3 +222,82 @@ implemented: source IDs are deliberately randomized, a reindex requires
 full forward/reverse CSR reconstruction, and it would add both peak memory
 and an O(n+m) preprocessing pass, which cannot be justified without a
 Linux score measurement.
+
+## Round 4: reverse-CSR redesign, measurements
+
+All checks below use the lead's check script on the Acer Linux test laptop (i5-1035G1, 8 threads): five timed full runs, sample/full/full-seed-2 SHA-256 checks, and cgroup `memory.peak`. Mac timings are identified separately. `S` is the check's formatted line count, not source `wc -l`.
+
+| Trial | Acer median (s) | Peak KB | S | Correctness | Decision |
+|---|---:|---:|---:|---|---|
+| Round-three baseline copied unchanged, eight workers | 1.022 (1.007, 1.008, 1.022, 1.038, 1.063) | 116,340 | 469 | sample/full/seed-2 full SHA OK | baseline; retained separately for comparison |
+| New undirected BFS relabel + packed CSR, original identity hash | 1.643 (1.625, 1.630, 1.643, 1.671, 1.882) | 123,128 | 560 | all three SHA OK | superseded: identity hash clusters all nearby relabelled nodes into same hash buckets |
+| Same BFS relabel + multiplicative distance hash | 1.599 (1.588, 1.592, 1.599, 1.600, 1.645) | 123,092 | 560 | all three SHA OK | faster by 44 ms; kept for further trials, still slower than baseline |
+| Directed/forward-only BFS instead of undirected BFS | 1.420 (1.419, 1.419, 1.420, 1.432, 1.446) | 123,268 | 558 | all three SHA OK | 179 ms faster, still slower than baseline; superseded |
+| Remap each packed edge once before CSR passes | 1.160 (1.145, 1.158, 1.160, 1.161, 1.175) | 123,296 | 553 | all three SHA OK | 260 ms faster, but baseline still wins; discarded for final |
+| Four-ary heap, starting from unchanged round-three source | 1.054 (1.050, 1.051, 1.054, 1.055, 1.067) | 116,296 | 473 | all three SHA OK | 32 ms slower than baseline, reverted |
+| Build reverse CSR from completed forward CSR, release parsed edge chunks first | 1.036 (1.030, 1.030, 1.036, 1.049, 1.056) | 92,384 | 475 | all three SHA OK | lower peak by 23,956 KB; stronger K ~9.3, kept as memory branch |
+| **Build forward CSR from completed reverse CSR, release parsed edge chunks first** | **0.956 (0.953, 0.955, 0.956, 0.959, 0.965)** | **92,556** | **475** | **all three SHA OK** | 80 ms faster than reverse-first alternative, kept |
+| **Compact both CSR sides to 4-byte edges**: 21-bit destination, 10-bit inline weight, exception bit and sorted `(edge-index, full-weight)` side vectors | **0.946 (0.934, 0.943, 0.946, 0.946, 0.966)** | **88,180** | **475** | **all three SHA OK** | saves another 4,376 KB and 10 ms; **current best, K ~9.8** |
+| 256-edge blocks for O(1)-size exceptional-weight scans | 0.996 (0.979, 0.984, 0.996, 0.998, 0.999) | 87,608 | 487 | all three SHA OK | 50 ms slower despite 572 KB savings; **reverted** |
+| Extend inline weight sentinel from 1024 to 2047 | 0.984 (0.976, 0.978, 0.984, 0.990, 1.018) | 87,088 | 475 | all three SHA OK | 38 ms slower despite 1,092 KB saved and fewer exception lookups; **reverted** |
+| **Final identical 1024-sentinel 4-byte source recheck** | **1.007 (1.002, 1.007, 1.007, 1.010, 1.017)** | **87,600** | **475** | **all three SHA OK** | final pinned revision; same source as the 0.946 s Acer trial, showing ~6% run-to-run/session variability; K_acer ~9.5 on final check |
+
+Additional targeted Mac-only tests: unidirectional Dijkstra *with forward-BFS reordering* used 0.3937 s in the search phase, versus 0.1069 s for bidirectional with the identical remapped CSR. Both produced the exact seed-1 full reference SHA. The single-direction alternative was rejected before spending an Acer check because its search work alone cost 3.7x as much.
+
+The earlier unidirectional **without** relabeling likewise measured 0.8744 s in the Mac search phase versus 0.1678 s with bidirectional. Neither alternative is used in the final source. Full-graph data has only 3,478 weights above 2047, versus 52,012 above 1023; surprisingly, extending the direct range up to 2046 was slower on Acer despite fewer exception lookups. The original 1024-sentinel 4-byte design remains the fastest tested configuration.
+
+Final source, Apple Silicon warm runs on seed-1 full: parse 0.019838/0.022254/0.019971 s (median **0.019971 s**), CSR 0.066547/0.067031/0.062097 s (median **0.066547 s**), query processing 0.185274/0.225048/0.180185 s (median **0.185274 s**). Seed-2 full also matched its published expected SHA. These are *not* Acer/scoring-machine phase figures; the standard Acer checker does not expose its internal phase split. A measured `parse <30 ms` result on Acer cannot honestly be claimed.
+
+Final Acer check, pasted verbatim:
+
+```text
+sample sha OK d-sample/distances.txt
+full sha OK d-full/distances.txt
+full2 (seed 2) sha OK d-full2/distances.txt
+full T median 1.007 s (runs 1.002 1.007 1.007 1.010 1.017)  memory.peak 87600 KB  S 475 (official count)  K_acer~9.5
+```
+
+Mac seed-1 phases, `SD_PROFILE=1`, Clang `-O3` on Apple Silicon (not Acer scoring): original new design with undirected BFS and direct hash was parse 0.0559 s, BFS 0.1486 s, final CSR 0.1337 s, search 0.2012 s (first/cold read); with BFS disabled on the same binary 0.0195/0/0.0595/0.1678 s. Multiplicative hashing cut the relabeled search to 0.1038 s, but did not repay the extra BFS plus CSR construction. A forward-only BFS (temporary `m` instead of `2m` arcs) measured 0.0541/0.0874/0.1339/0.0970 s on Mac and matched seed-1 full SHA; Acer check pending.
+
+With packed edges remapped once, Mac full seed-1 phases were parse 0.0190 s, relabel/remap 0.1057 s, CSR 0.0721 s, search 0.1095 s; the preprocessing still costs more than it saves. The relabeling/hash interaction was real: using `node & 65535` for BFS-ordered IDs is very collision-prone, while the multiplicative hash restores uniformly distributed slots. But overall Acer wall time and K decreased, so BFS renumbering is not retained as default.
+
+Reconstructing the second CSR direction from the first instead of rescanning the 64-bit parsed triples permits those buffers to be freed *before* the second 5M-edge CSR allocation. The reverse-to-forward order beat forward-to-reverse on Acer and in local two-seed phase tests, despite exact same graph and SHA outputs. With 4-byte edges, weights above 1023 (52,012 of seed-1's 5,000,000 arcs) live in sorted exceptional-weight lookup vectors keyed by *CSR edge index*. These vectors are consulted only for flagged arcs, so full 32-bit weights and zero-cost arcs are preserved. The block-index alternative was correctly hashed but slower, so binary search remains.
+
+Baseline check output:
+
+```text
+sample sha OK d-sample/distances.txt
+full sha OK d-full/distances.txt
+full2 (seed 2) sha OK d-full2/distances.txt
+full T median 1.022 s (runs 1.007 1.008 1.022 1.038 1.063)  memory.peak 116340 KB  S 469 (official count)  K_acer~8.9
+```
+
+## Round 5: Acer phase-led optimization
+
+All measurements below use the lead's check script (`check1.sh d`) on the Acer test laptop. Every checker run validates sample/full/seed-2-full hashes, runs five timed full trials, measures `memory.peak`, and counts formatted source lines. Source changes are retained only when all hashes remain correct and the checker's printed K increases.
+
+| Trial | Acer median (five times) | Peak KB | Official S | K_acer | Decision |
+|---|---|---:|---:|---:|---|
+| r5-baseline, copied Round 4 | 0.951 s (0.945 0.947 0.951 0.956 0.960) | 88,328 | 475 | 9.8 | Baseline; all SHA OK |
+| r5-smaller-frontier, expand whichever Dijkstra queue has fewer heap entries | 0.929 s (0.925 0.927 0.929 0.936 0.936) | 88,080 | 473 | 9.9 | **Kept**; all SHA OK, +0.1 K |
+| r5-smaller-distance, expand minimum-distance queue except for enormous frontier distances | 0.970 s (0.967 0.968 0.970 0.977 1.010) | 88,228 | 475 | 9.7 | **Reverted**; all SHA OK but lower K |
+| r5-32k-sparse-dist, halve each per-worker sparse-distance hash table | 0.857 s (0.851 0.855 0.857 0.862 0.866) | 223,888 | 473 | 8.5 | **Reverted**; all SHA OK, but a query triggered dense fallback and sharply increased memory peak, overwhelming the speed gain |
+| r5-6-workers, reduce query threads from eight to six | 0.948 s (0.945 0.946 0.948 0.955 0.958) | 87,808 | 473 | 9.8 | **Reverted**; fewer threads lowered K |
+| r5-forward-exception-scan, replace binary search with monotone exception iterator when reconstructing CSR | 0.928 s (0.926 0.927 0.928 0.936 0.943) | 87,712 | 472 | 9.9 | **Reverted by strict rule**; SHA OK but printed K tied incumbent 9.9 |
+| r5-unpacked-heap, use 16-byte aligned heap elements instead of packed 12-byte elements | 0.984 s (0.941 0.948 0.984 1.083 1.145) | 87,716 | 473 | 9.6 | **Reverted**; slower and lower K, with visible Acer timing variability |
+| r5-parallel-reverse-scatter, 12 concurrent atomic reverse-CSR cursors with thread-local exceptional-weight lists | 0.916 s (0.913 0.915 0.916 0.922 0.929) | 90,048 | 491 | 9.9 | **Reverted by strict rule**; SHA OK and time improved, but memory/source costs kept K tied |
+| r5-128k-sparse-dist, double per-worker hash-table entries to reduce collision chains | 1.057 s (1.049 1.051 1.057 1.062 1.075) | 88,088 | 473 | 9.3 | **Reverted**; source remained correct, larger hot-table footprint hurt cache performance |
+| r5-fused-degree-count, count both CSR in/out degrees in one pass over parsed arcs | 0.959 s (0.954 0.956 0.959 0.959 0.963) | 88,320 | 472 | 9.7 | **Reverted**; coupling two random degree arrays was slower |
+
+Final clean checker on the restored best candidate:
+
+```text
+sample sha OK d-sample/distances.txt
+full sha OK d-full/distances.txt
+full2 (seed 2) sha OK d-full2/distances.txt
+full T median 0.931 s (runs 0.927 0.931 0.931 0.933 0.946)  memory.peak 88384 KB  S 473 (official count)  K_acer~9.9
+```
+
+The final source differs from Round 4 only by using the smaller bidirectional heap frontier to select the side to expand. The original's special-case correctness is preserved; every official Acer SHA check across all variants matched the reference. Relative to the first clean Round 5 measurement, 0.951 s / 88,328 KB / S 475 / K 9.8, the final scored 0.931 s / 88,384 KB / S 473 / K 9.9. These are measurements on Acer's eight-thread laptop, not the twelve-thread official scoring box, and the run-to-run difference is small enough that the original Round 4 source's score cannot be distinguished without more trials.
+
+The baseline was profiled using a temporary print-to-stderr build via a one-run profiling script (not used as a timing score): parse **0.039010 s**, CSR construction **0.288704 s**, search/query handling **0.599055 s**, combined single-run wall **0.934013 s**. Hence search dominates (roughly 64% of the wall), followed by CSR (31%); parse is already ~4%. Profiling output was removed from the official candidate before the next checker. The smaller-frontier change still uses the standard valid bidirectional Dijkstra stopping condition and handles all special paths/weights correctly on the three test sets.

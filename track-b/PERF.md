@@ -34,7 +34,7 @@ Board run ID: not available (the lead handles submission). No SSH, server modifi
 
 ## Round 2: official Acer loop
 
-The Round 2 worker is authorized to use the contest Acer host. All Round 2 timing and memory numbers below come from the lead's official serialized checker (`check1.sh`), which compiles with the contest-style flags, verifies the seed-1 sample and full SHA-256 outputs, times five full runs, and reads cgroup `memory.peak`.
+Round 2 ran on the Acer test laptop. All Round 2 timing and memory numbers below come from the lead's official serialized checker (`check1.sh`), which compiles with the contest-style flags, verifies the seed-1 sample and full SHA-256 outputs, times five full runs, and reads cgroup `memory.peak`.
 
 | Step | Change | Acer median wall (s) | memory.peak (KB) | S~ | K_acer~ | Outcome |
 |---|---|---:|---:|---:|---:|---|
@@ -109,3 +109,53 @@ The final scalar-fallback binary was compiled on macOS and output hashes checked
 | **seed 2 full** (newly generated) | `7f224ef65795253d56911fa8f25553a8fd0a2cef4addc7bd411e40e8da990869` | PASS vs independently run official Python reference |
 
 Full seed 2 was generated from the unmodified official generator with `--seed 2 --scale full`; the generator printed 250,000 docs, 251,351,689 corpus bytes, 50,000 queries and 609,816 distinct tokens. The Python official reference was run separately, and the final R3-7 file was byte-identical. The final source also **compiled** for `x86_64 -march=x86-64-v3` using Apple clang to check the AVX2 branch, but that is not a Linux GCC 15 build or a performance run. No official Acer `memory.peak`, serialized five-run median or K score for Round 3 exists; do not promote this variant solely on these Mac measurements.
+
+## Round 4: Acer measurement and optimization log
+
+All Round 4 measurements use the lead's check script (`check1.sh b`) unless explicitly labelled as a one-run phase profile. The checker validates seed-1 sample, seed-1 full and seed-2 full before timing five full runs.
+
+| Step | Change | Acer result | Outcome |
+|---|---|---|---|
+| r4-baseline | Unmodified Round 3 | **0.698 s** median (0.671, 0.686, 0.698, 0.702, 0.721), **88,376 KB**, S~353, K~13.7 | All three SHA checks OK; baseline |
+| r4-profile | Temporary clock_gettime profiling passes | 1.05 s-class because profiling adds two extra corpus scans | Correct; instrumentation only, removed before final |
+| r4-filter-1 | Replace the 128 KiB two-word/two-bit Bloom check with one 1 MiB single-bit bitmap | Profile filter 0.319 s, scan+write 0.512 s; checker memory ~100 MB | **Reverted:** larger random footprint was slower and larger |
+| r4-filter-2 | Keep 128 KiB Bloom storage but place both rejection bits in one fetched 64-bit word | Profile filter about 0.228-0.232 s, scan+write about 0.408-0.413 s in clean-ish one-run samples | **Retained for clean check:** one random Bloom load instead of two |
+| r4-filter-3 | Add a 2 MiB direct hash-to-term table before Bloom/hash-table fallback | Profile filter 0.249 s, scan+write 0.502 s; checker peak ~93 MB | **Reverted:** larger cache footprint lost |
+| r4-filter-4 | CRC32 fingerprint for >=8-byte tokens | Profile filter 0.269 s, scan+write 0.442 s | **Reverted:** slower than the simple first/last-word fingerprint |
+| r4-filter-5 | Rebuild the scan hash table to omit query terms not used as Boolean postings or phrase anchors | Profile filter 0.260 s, scan+write 0.430 s | **Reverted:** no measured gain; matches Round 3's earlier mixed result |
+
+### Round 4 phase split before optimization
+
+One full-data Acer run of the temporary instrumented baseline, with exactly 8 scan threads, measured: **pure tokenizer 0.081501 s; tokenizer + query-term filter 0.271817 s; tokenizer + filter + posting/position writes 0.436365 s; sparse/position merge 0.086911 s; whole build 0.528816 s; parallel query evaluation 0.090856 s; output 0.005797 s**. The filter adds roughly 0.190 s over tokenization and scan writes add roughly another 0.165 s, so those two scan components dominate. The full dataset had **75,747 query terms, 382 dense Boolean terms, 53,062 sparse Boolean terms, 11,236,807 sparse postings, 1,185,623 phrase-anchor offsets and 11,939,792 bytes of dense bitmaps**. The final sparse posting array alone is about 44.9 MB; its temporary 16-bit scan streams are about 22.5 MB before capacity overhead, explaining much of the build-time memory peak.
+
+The one-word blocked Bloom profile was re-run after adjacent reversions: tokenizer **0.065536 s**, filter **0.231506 s**, scan+write **0.412965 s**, merge **0.080062 s**, build **0.498749 s**, query evaluation **0.090871 s**, output **0.006014 s**. Host load is visibly noisy, so the retained/reverted decision must come from the clean five-run checker after profiling code is removed, not from these single phase runs alone.
+
+## Round 5: filter/write experiments on the official Acer checker
+
+Every row below is a complete `check1.sh b` run: seed-1 sample, seed-1 full and seed-2 full hashes all matched before the five timed full runs. Per the Round 5 rule, a change is retained only when the checker-reported `K_acer` rises.
+
+| Step | Change | Acer result | Outcome |
+|---|---|---|---|
+| r5-baseline | Unmodified Round 4 retained one-word/two-bit Bloom source | **0.598 s** median (0.578, 0.589, 0.598, 0.599, 0.605), **97,296 KB**, S 963, K 12.5 | Baseline; all three SHA checks OK |
+| r5-hash8 | Hash >=8-byte tokens from masked first/last 8-byte loads instead of first/last 4-byte loads | 0.617 s, 97,696 KB, S 971, K 12.2 | **Reverted:** slower, larger source, lower K |
+| r5-restored | Exact baseline after reverting hash8 | 0.596 s, 96,876 KB, S 963, K 12.5 | Confirms the revert |
+| r5-batch16 | Batch 16 token hashes, test Bloom words together, prefetch initial hash-table slots, then resolve in order | 0.650 s, 97,216 KB, S 1000, K 11.9 | **Reverted:** batching/prefetch overhead outweighed hidden cache latency |
+| r5-parallel-scatter | Reuse worker threads to scatter each thread's sparse postings into its disjoint final ranges in parallel | 0.614 s, 107,316 KB, S 967, K 12.0 | **Reverted:** thread-stack/page peak rose about 10 MB and K fell |
+| r5-u32-seen | Pack each scan thread's local-document stamp and posting count into one 32-bit word (16 bits each), then reuse that word as the merge cursor | **0.589 s**, **95,112 KB**, S 964, **K 12.6** | **Kept:** lower wall time and ~2.2 MB lower peak; full scale has only ~31k docs per Acer scan slice and ~21k on the 12-thread scoring box, so both fields fit |
+| r5-cache-sig | Pack the positive-cache entry as hash signature + term id, mirroring the dictionary table, so cache collisions are rejected without a random `Term` metadata read | **0.583 s**, **94,996 KB**, S 965, **K 12.7** | **Kept:** faster and higher K with no extra cache storage |
+| r5-packed-term | Remove the now-unused `Term.sig` field and pack `Term` to 12 bytes | 0.582 s, 94,776 KB, S 965, K 12.7 | **Reverted:** tiny memory/time movement but no printed K increase, so it fails the strict keep rule |
+| r5-deferred-sparse-dedup | During corpus tokenization append sparse term ids sequentially without touching their random per-term stamp/count state; after each worker finishes its slice, compact that stream in place by document and build counts in a separate pass. Dense terms still deduplicate inline in a tiny 16-bit stamp array. | **0.510 s** median (0.479, 0.507, 0.510, 0.510, 0.510), **94,368 KB**, S 985, **K 13.5** | **Kept:** moved the sparse random-access work out of the tokenizer/filter loop and raised K substantially despite 20 extra source lines |
+| r5-parallel-zero | Delay allocation/zeroing of each sparse count table until its scan worker starts the post-scan compaction pass, so the ~1.7 MB initialization is parallel rather than serialized before scanning | **0.479 s** median (0.475, 0.478, 0.479, 0.499, 0.511), **94,992 KB**, S 986, **K 13.9** | **Kept:** materially lower median and higher K |
+| r5-lower-or | Since callers pass only token bytes, replace `lower_ascii`'s uppercase range test with `c | 32` | 0.482 s, 95,092 KB, S 984, K 13.9 | **Reverted:** hashes remained correct but K did not rise |
+| r5-compact-term | Replace each 16-byte `Term` pointer/length/signature record with a query-file-relative offset and 16-bit length | 0.499 s (0.483, 0.498, 0.499, 0.502, 0.502), 94,664 KB, S 989, K 13.7 | **Reverted:** metadata shrank, but K fell |
+| r5-short-table | Direct base-36 lookup table for one- and two-byte query terms, bypassing hashing/Bloom for those tokens | 0.486 s (0.463, 0.475, 0.486, 0.498, 0.500), 94,596 KB, S 1003, K 13.8 | **Reverted:** no K improvement and source grew |
+| r5-list-template | Merge intermediate sparse set operations and final sparse summarization into one templated `list_op` implementation | 0.502 s (0.496, 0.500, 0.502, 0.509, 0.517), 95,144 KB, S 919, K 13.8 | **Reverted:** excellent source reduction, but the generic path slowed enough to lower K |
+| r5-set-op | Keep final summarization specialized, but merge the three intermediate sparse set helpers into one branched function | 0.509 s (0.476, 0.502, 0.509, 0.510, 0.514), 95,164 KB, S 978, K 13.5 | **Reverted:** shorter source did not compensate for slower queries |
+| r5-cache-2048 | Double the direct-mapped positive cache from 1,024 to 2,048 entries | 0.489 s (0.480, 0.481, 0.489, 0.512, 0.522), 95,196 KB, S 986, K 13.8 | **Reverted:** larger hot footprint did not improve K |
+| r5-cache-offset | Use a 64-bit positive-cache entry containing signature, query-file offset, length and term id so cache hits avoid loading `Term` metadata | 0.533 s (0.498, 0.504, 0.533, 0.534, 0.561), 95,008 KB, S 996, K 13.2 | **Reverted:** larger cache entries lost badly |
+| r5-raw-pairs | Replace the growing sparse pair vector with a preallocated raw 16-bit array sized from the slice byte upper bound | 0.554 s (0.550, 0.552, 0.554, 0.555, 0.557), 100,576 KB, S 986, K 12.8 | **Reverted:** over-allocation raised peak memory and slowed the run |
+| r5-singleton-bucket | Add a direct table that marks each original hash bucket empty/singleton/colliding, resolving or rejecting singleton buckets before Bloom/probing | 0.528 s (0.508, 0.527, 0.528, 0.529, 0.538), 95,612 KB, S 998, K 13.2 | **Reverted:** extra table traffic and memory outweighed saved probes |
+
+The retained Round 5 profile after deferred sparse deduplication showed the new split clearly: worker scan about **0.310 s**, post-scan sparse compaction only **0.0045 s**, phrase-position layout about **0.010 s**, final sparse scatter about **0.060 s**, query evaluation about **0.088 s**, and output about **0.005 s** in one instrumented Acer run. A separate counter-only profile saw **36,276,657 tokens**, with **14,324,246 positive-cache hits**, **14,392,451 dictionary hits after the cache**, and **7,559,960 true misses**. Counter instrumentation perturbed timing, so only the lookup counts, not that run's wall time, are used here.
+
+Final clean Round 5 checker run after all reversions and documentation/config cleanup: **0.509 s** median (0.506, 0.509, 0.509, 0.512, 0.515), **94,648 KB** `memory.peak`, **S 986**, **K_acer 13.5**; seed-1 sample, seed-1 full and seed-2 full SHA checks all passed. The initial Round 5 baseline was 0.598 s / 97,296 KB / S 963 / K 12.5, so the final retained source is about 15% faster, uses about 2.6 MB less measured peak memory, and raises the checker estimate by 1.0 K despite the source-size increase. The best adjacent retained measurement was 0.479 s / K 13.9; repeated checks show enough Acer load noise that the final clean run is the number used for delivery.
