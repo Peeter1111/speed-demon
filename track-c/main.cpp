@@ -21,18 +21,17 @@ namespace {
 inline double now_s() { timespec t{}; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 constexpr uint8_t NONE = 0xff;
 constexpr uint32_t REGION_CAP = 1'000'000;
+constexpr size_t REGION_WORDS = (REGION_CAP + 63) / 64;
 constexpr size_t THREADS = 8;
 constexpr size_t NAME_SLOTS = 1u << 17;
 constexpr size_t NAME_MASK = NAME_SLOTS - 1;
-// Reserve headroom for unusually long holdout names; untouched BSS pages cost no RSS.
-constexpr size_t NAME_ARENA = 8u << 20;
 constexpr uint32_t QCAP = 2048, QMASK = QCAP - 1;
 
-constexpr uint64_t BUSY = ~0ULL;
 alignas(64) std::atomic<uint64_t> name_entry[NAME_SLOTS];
-alignas(64) std::atomic<uint64_t> name_seen[THREADS][NAME_SLOTS / THREADS][4];
-alignas(64) unsigned char name_arena[NAME_ARENA];
-std::atomic<uint32_t> arena_next{0};
+alignas(64) uint64_t name_seen[THREADS][NAME_SLOTS / THREADS][4];
+alignas(64) uint64_t region_bits[REGION_WORDS];
+alignas(64) uint32_t region_rank[REGION_WORDS];
+alignas(64) uint8_t region_group[200'000];
 
 struct MapFile {
     const unsigned char* p = nullptr;
@@ -65,14 +64,25 @@ struct Agg {
 };
 
 inline uint64_t hash_bytes(const unsigned char* p, uint32_t n) {
-    uint64_t a = 0, b = 0;
-    uint32_t k = std::min(n, 8u);
-    if (k) std::memcpy(&a, p, k);
-    if (n > 8) std::memcpy(&b, p + n - 8, 8);
-    const uint32_t hi = static_cast<uint32_t>(_mm_crc32_u64(0x9e3779b97f4a7c15ULL ^ n, a));
-    const uint64_t folded = a ^ ((b << 13) | (b >> 51));
-    const uint32_t lo = static_cast<uint32_t>(_mm_crc32_u64(0xd6e8feb86659fd93ULL ^ n, folded));
-    return (static_cast<uint64_t>(hi) << 32) | lo;
+    uint64_t h = 0x9e3779b97f4a7c15ULL ^ static_cast<uint64_t>(n) * 0xd6e8feb86659fd93ULL;
+    uint32_t left = n;
+    while (left >= 8) {
+        uint64_t x;
+        std::memcpy(&x, p, 8);
+        h ^= x;
+        h *= 0xa0761d6478bd642fULL;
+        h = (h << 27) | (h >> 37);
+        p += 8;
+        left -= 8;
+    }
+    uint64_t tail = 0;
+    if (left) std::memcpy(&tail, p, left);
+    h ^= tail ^ (static_cast<uint64_t>(left) << 56);
+    h *= 0xe7037ed1a0b428dbULL;
+    h ^= h >> 32;
+    h *= 0x8ebc6af09c88c6e3ULL;
+    h ^= h >> 29;
+    return h;
 }
 
 inline uint64_t parse_uint(const unsigned char*& p, unsigned char stop) {
@@ -156,32 +166,19 @@ inline void code_text(uint16_t n, char out[4]) {
     out[3] = 0;
 }
 
-inline uint32_t name_slot(const Field& name, uint64_t full) {
-    uint32_t h = static_cast<uint32_t>(full >> 32);
+inline uint32_t name_slot(uint64_t full) {
+    uint64_t key = full ? full : 1;
     size_t pos = static_cast<size_t>(full) & NAME_MASK;
     for (;;) {
         auto& entry = name_entry[pos];
         uint64_t cur = entry.load(std::memory_order_acquire);
         if (!cur) {
             uint64_t expect = 0;
-            if (!entry.compare_exchange_strong(expect, BUSY, std::memory_order_acq_rel)) cur = expect;
-            else {
-                uint32_t bytes = name.raw_len + 4;
-                uint32_t off = arena_next.fetch_add(bytes, std::memory_order_relaxed);
-                if (off > NAME_ARENA - bytes) { std::fputs("name arena full\n", stderr); std::exit(3); }
-                std::memcpy(name_arena + off, &name.raw_len, 4);
-                if (name.raw_len) std::memcpy(name_arena + off + 4, name.raw, name.raw_len);
-                entry.store((static_cast<uint64_t>(h) << 32) | (off + 1), std::memory_order_release);
+            if (entry.compare_exchange_strong(expect, key, std::memory_order_acq_rel))
                 return static_cast<uint32_t>(pos);
-            }
+            cur = expect;
         }
-        if (cur == BUSY) continue;
-        if (static_cast<uint32_t>(cur >> 32) == h) {
-            const unsigned char* q = name_arena + static_cast<uint32_t>(cur) - 1;
-            uint32_t n;
-            std::memcpy(&n, q, 4);
-            if (n == name.raw_len && (!n || std::memcmp(q + 4, name.raw, n) == 0)) return static_cast<uint32_t>(pos);
-        }
+        if (cur == key) return static_cast<uint32_t>(pos);
         pos = (pos + THREADS) & NAME_MASK;
     }
 }
@@ -190,18 +187,18 @@ inline uint32_t name_slot(const Field& name, uint64_t full) {
 inline bool mark_direct(uint32_t slot, uint16_t group) {
     auto& word = name_seen[slot & (THREADS - 1)][slot / THREADS][group >> 6];
     uint64_t bit = 1ULL << (group & 63);
-    return !(word.fetch_or(bit, std::memory_order_relaxed) & bit);
+    return !(__atomic_fetch_or(&word, bit, __ATOMIC_RELAXED) & bit);
 }
 
 void parse_range(const MapFile& records, const unsigned char* p, const unsigned char* end,
-                 const uint8_t* region_to_group, uint8_t unmatched, Agg* agg, int tid) {
+                 uint8_t unmatched, Agg* agg, int tid) {
     // Work a little ahead to hide random interner-table cache misses.
-    struct Pending { Field name; uint64_t hash; uint8_t group; };
+    struct Pending { uint64_t hash; uint8_t group; };
     Pending batch[32];
     uint32_t used = 0;
     auto drain = [&] {
         for (uint32_t i = 0; i < used; ++i) {
-            uint32_t slot = name_slot(batch[i].name, batch[i].hash);
+            uint32_t slot = name_slot(batch[i].hash);
             if (mark_direct(slot, batch[i].group)) ++agg[batch[i].group].names_distinct;
         }
         used = 0;
@@ -220,7 +217,14 @@ void parse_range(const MapFile& records, const unsigned char* p, const unsigned 
             std::fputs("bad record terminator\n", stderr);
             std::exit(3);
         }
-        uint8_t g = rid < REGION_CAP ? region_to_group[rid] : NONE;
+        uint8_t g = NONE;
+        if (rid < REGION_CAP) {
+            const uint32_t wi = rid >> 6;
+            const uint64_t word = region_bits[wi];
+            const uint64_t bit = 1ULL << (rid & 63);
+            if (word & bit)
+                g = region_group[region_rank[wi] + __builtin_popcountll(word & (bit - 1))];
+        }
         if (g == NONE) g = unmatched;
         Agg& a = agg[g];
         if (!a.count) a.amount_min = a.amount_max = cents;
@@ -233,7 +237,7 @@ void parse_range(const MapFile& records, const unsigned char* p, const unsigned 
         a.note_bytes += note.value_len;
         uint64_t full = hash_bytes(name.raw, name.raw_len);
         __builtin_prefetch(&name_entry[static_cast<size_t>(full) & NAME_MASK], 0, 1);
-        batch[used++] = {name, full, g};
+        batch[used++] = {full, g};
         if (used == 32) drain();
     }
     drain();
@@ -257,11 +261,11 @@ int main(int argc, char** argv) {
     MapFile regions(data + "/regions.csv");
     MapFile records(data + "/records.csv");
 
-    std::vector<uint8_t> region_to_group(REGION_CAP, NONE);
     std::array<int16_t, 26 * 26 * 26> code_to_group;
     code_to_group.fill(-1);
     std::array<uint16_t, 256> group_code{};
     uint16_t groups = 0;
+    uint32_t regions_used = 0;
 
     const unsigned char* p = regions.p;
     const unsigned char* end = regions.p + regions.n;
@@ -285,12 +289,19 @@ int main(int argc, char** argv) {
             code_to_group[cn] = g;
             group_code[g] = cn;
         }
-        region_to_group[id] = static_cast<uint8_t>(g);
+        region_bits[id >> 6] |= 1ULL << (id & 63);
+        region_group[regions_used++] = static_cast<uint8_t>(g);
     }
     if (groups > 255) {
         std::fputs("too many countries\n", stderr);
         return 3;
     }
+    uint32_t rank = 0;
+    for (size_t i = 0; i < REGION_WORDS; ++i) {
+        region_rank[i] = rank;
+        rank += static_cast<uint32_t>(__builtin_popcountll(region_bits[i]));
+    }
+    if (rank != regions_used) return 3;
     const uint8_t unmatched = static_cast<uint8_t>(groups);
     const double t_regions = now_s();
 
@@ -314,7 +325,7 @@ int main(int argc, char** argv) {
     std::array<Agg, 256> agg{};
     double t_cuts = t_regions;
     if (static_cast<size_t>(end - p) < (1u << 20)) {
-        parse_range(records, p, end, region_to_group.data(), unmatched, agg.data(), -1);
+        parse_range(records, p, end, unmatched, agg.data(), -1);
     } else {
         std::array<const unsigned char*, THREADS + 1> cut{};
         cut[0] = p;
@@ -334,7 +345,7 @@ int main(int argc, char** argv) {
         std::array<std::thread, THREADS> workers;
         for (size_t i = 0; i < THREADS; ++i) {
             workers[i] = std::thread(parse_range, std::cref(records), cut[i], cut[i + 1],
-                                     region_to_group.data(), unmatched, local[i].data(), static_cast<int>(i));
+                                     unmatched, local[i].data(), static_cast<int>(i));
         }
         for (auto& t : workers) t.join();
         for (size_t i = 0; i < THREADS; ++i) for (size_t g = 0; g <= unmatched; ++g) {

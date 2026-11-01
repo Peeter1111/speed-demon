@@ -19,7 +19,7 @@ using U32 = uint32_t;
 using U64 = uint64_t;
 constexpr U64 MASK = (U64{1} << 53) - 1;
 constexpr U64 INF = MASK;
-constexpr U32 NODE_MASK = (1U << 21) - 1, START_MASK = (1U << 23) - 1, BIG_FLAG = 1U << 10;
+constexpr U32 NODE_MASK = (1U << 21) - 1, START_MASK = (1U << 23) - 1, BIG_FLAG = 2047U;
 
 struct Mapping {
     int fd = -1;
@@ -110,7 +110,7 @@ struct Graph {
             ++start[1][(static_cast<U32>(e >> 21) & NODE_MASK) + 1];
         for (auto& x : start)
             for (U32 i = 1; i <= n; ++i) x[i] += x[i - 1];
-        auto next_f = start[0], next_b = start[1];
+        auto next_b = start[1];
         auto edge = [&](int side, U32 index, U32 to, U32 w) {
             if (w >= BIG_FLAG) big[side].emplace_back(index, w);
             return to | ((w < BIG_FLAG ? w : BIG_FLAG) << 21);
@@ -127,6 +127,9 @@ struct Graph {
         }
         for (auto& c : chunks) std::vector<U64>().swap(c);
         for (auto& c : wide) std::vector<U32>().swap(c);
+        // Reverse scatter is finished; only the forward cursor is needed now.
+        std::vector<U32>().swap(next_b);
+        auto next_f = start[0];
         edges[0].resize(static_cast<size_t>(m) + 1);
         std::sort(big[1].begin(), big[1].end());
         for (U32 v = 0; v < n; ++v) {
@@ -160,40 +163,57 @@ struct Graph {
 };
 
 struct Query { U32 s, t; };
-struct __attribute__((packed)) Item { U64 d; U32 v; };
-// Compact binary heap with stale entries removed on pop.
+struct Item { U64 d; U32 v; };
+// Store the common-distance heap entries as one sortable 64-bit word.
+// If a valid route needs >= 2^43, promote this heap to exact wide entries.
 struct Heap {
-    std::vector<Item> a;
-    Heap() { a.reserve(256); }
-    bool empty() const { return a.empty(); }
-    U64 min() const { return a.front().d; }
-    void clear() { a.clear(); }
-    void push(U64 d, U32 v) {
-        size_t i = a.size();
-        a.push_back({d, v});
-        while (i) {
-            size_t parent = (i - 1) / 2;
-            if (a[parent].d <= d) break;
-            a[i] = a[parent];
-            i = parent;
-        }
-        a[i] = {d, v};
+    static constexpr U64 LIMIT=U64{1}<<43;
+    std::vector<U64> a;
+    std::vector<Item> wide;
+    bool is_wide=false;
+    Heap(){a.reserve(256);}
+    bool empty() const {return is_wide?wide.empty():a.empty();}
+    size_t size()const{return is_wide?wide.size():a.size();}
+    U64 min()const{return is_wide?wide.front().d:(a.front()>>21);}
+    void clear(){a.clear();wide.clear();is_wide=false;}
+    void promote(){
+        wide.reserve(a.size()+16);
+        for(U64 x:a)wide.push_back({x>>21,U32(x)&NODE_MASK});
+        a.clear();is_wide=true;
     }
-    Item pop() {
-        Item top = a.front();
-        Item tail = a.back();
-        a.pop_back();
-        if (a.empty()) return top;
-        size_t i = 0, size = a.size();
-        while (2 * i + 1 < size) {
-            size_t first = 2 * i + 1, best = first;
-            if (first + 1 < size && a[first + 1].d < a[first].d) best = first + 1;
-            if (tail.d <= a[best].d) break;
-            a[i] = a[best];
-            i = best;
+    void push(U64 d,U32 v){
+        if(!is_wide&&d>=LIMIT)promote();
+        if(is_wide){
+            size_t i=wide.size();wide.push_back({d,v});
+            while(i){size_t parent=(i-1)/2;if(wide[parent].d<=d)break;wide[i]=wide[parent];i=parent;}
+            wide[i]={d,v};return;
         }
-        a[i] = tail;
-        return top;
+        U64 x=(d<<21)|v;
+        size_t i=a.size();a.push_back(x);
+        while(i){size_t parent=(i-1)/2;if(a[parent]<=x)break;a[i]=a[parent];i=parent;}
+        a[i]=x;
+    }
+    Item pop(){
+        if(is_wide){
+            Item top=wide.front(),tail=wide.back();wide.pop_back();
+            if(wide.empty())return top;
+            size_t i=0,size=wide.size();
+            while(2*i+1<size){size_t first=2*i+1,best=first;
+                if(first+1<size&&wide[first+1].d<wide[first].d)best=first+1;
+                if(tail.d<=wide[best].d)break;wide[i]=wide[best];i=best;
+            }
+            wide[i]=tail;return top;
+        }
+        U64 top=a.front(),tail=a.back();a.pop_back();
+        if(!a.empty()){
+            size_t i=0,size=a.size();
+            while(2*i+1<size){size_t first=2*i+1,best=first;
+                if(first+1<size&&a[first+1]<a[first])best=first+1;
+                if(tail<=a[best])break;a[i]=a[best];i=best;
+            }
+            a[i]=tail;
+        }
+        return {top>>21,U32(top)&NODE_MASK};
     }
 };
 
@@ -304,7 +324,7 @@ struct Solver {
         int side = 0;
         while (!heap[0].empty() && !heap[1].empty()) {
             if (best != INF && heap[0].min() + heap[1].min() >= best) break;
-            side = heap[0].a.size() <= heap[1].a.size() ? 0 : 1;
+            side = heap[0].size() <= heap[1].size() ? 0 : 1;
             Heap& q = heap[side];
             auto [d, u] = q.pop();
             if (d != get(side, u)) continue;

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -60,13 +61,22 @@ static inline u64 hash_lower(const char *p, size_t n) {
   else for(size_t i=0;i<n;i++)h^=u32(lower_ascii((unsigned char)p[i]))<<(i*8);
   h^=h>>16;h*=0x7feb352du;h^=h>>15;return h?h:1;
 }
+static inline u32 key_short(const char*p,size_t n){
+  u32 key=0;for(size_t i=0;i<n;i++)key|=u32((unsigned char)p[i]|32)<<(8*i);return key;
+}
 struct Term { const char *p; u32 len, sig; };
 
 struct Dict {
   std::vector<u32> tab;
+  // Exact, direct key access for all 1- to 4-byte ASCII query terms.
+  std::vector<u64> shorttab;
   std::vector<u64> bloom;
   std::vector<Term> terms;
-  explicit Dict(size_t cap = 1u<<17) : tab(cap),bloom(1u<<14) { terms.reserve(100000); }
+  explicit Dict(size_t cap = 1u<<17) : tab(cap),shorttab(1u<<14),bloom(1u<<14) { terms.reserve(100000); }
+  u32 find_short(const char*p,size_t n)const{
+    u32 key=key_short(p,n);u32 mask=u32(shorttab.size()-1),i=(key*0x9e3779b1u)>>(32-14);
+    while(shorttab[i]){if(u32(shorttab[i]>>32)==key)return u32(shorttab[i])-1;i=(i+1)&mask;}return NIL;
+  }
   bool eq(u32 id, const char *p, size_t n, bool folded) const {
     const Term &t = terms[id];
     if (t.len != n) return false;
@@ -78,6 +88,11 @@ struct Dict {
     return true;
   }
   u32 get_or_add(const char *p, size_t n) {
+    if(n<=4){
+      u32 key=key_short(p,n),mask=u32(shorttab.size()-1),i=(key*0x9e3779b1u)>>(32-14);
+      while(shorttab[i]){if(u32(shorttab[i]>>32)==key)return u32(shorttab[i])-1;i=(i+1)&mask;}
+      u32 id=u32(terms.size());terms.push_back({p,u32(n),0});shorttab[i]=(u64(key)<<32)|(id+1);return id;
+    }
     u64 h=hash_lower(p,n); u32 sig=u32(h); size_t m=tab.size()-1, i=h&m;
     while (tab[i]) {
       u32 x=tab[i],id=(x&0x1ffffu)-1;if ((x>>17)==(sig>>17) && eq(id,p,n,false)) return id;
@@ -87,6 +102,7 @@ struct Dict {
     return id;
   }
   u32 find_folded(const char *p, size_t n, u64 h) const {
+    if(n<=4)return find_short(p,n);
     u32 sig=u32(h),g=sig*0x9e3779b1u;u64 bm=(1ULL<<(h&63))|(1ULL<<(g&63));if((bloom[(h>>6)&(bloom.size()-1)]&bm)!=bm)return NIL;
     size_t m=tab.size()-1, i=h&m;
     while (tab[i]) {
@@ -145,15 +161,36 @@ static u32 document_count(const MMap &docs) {
 
 struct Posting { u32 off=0, len=0; };
 struct List { const u32 *p=nullptr; u32 n=0; };
+struct Scratch {
+  std::unique_ptr<u32[]> p;size_t cap=0;
+  void ensure(size_t n){if(n>cap){p.reset(new u32[n]);cap=n;}}
+};
+struct Chunk {
+  u32 first=0;
+  std::vector<u16> data;
+  std::vector<u32> start;
+};
 struct Index {
-  std::unique_ptr<u32[]> data;
+  // One contiguous 16-bit local document-id stream per scanner partition.
+  // A term's per-partition ranges stay ordered in global document order.
+  std::vector<Chunk> chunks;
   std::vector<Posting> post;
+  std::vector<u32> sparseid;
   std::unique_ptr<u32[]> posdata;
   std::vector<Posting> pospost;
   std::vector<u64> dense;
   std::vector<u32> denseid;
   size_t words=0;
-  List get(u32 t) const { const Posting &x=post[t]; return {data.get()+x.off,x.len}; }
+  List get(u32 t,Scratch&scratch) const {
+    const Posting &x=post[t];static const u32 empty=0;
+    if(!x.len)return {&empty,0};
+    scratch.ensure(x.len);
+    u32 s=sparseid[t],off=0;
+    for(const auto &c:chunks){
+      for(u32 i=c.start[s],end=c.start[s+1];i<end;i++)scratch.p[off++]=c.first+c.data[i];
+    }
+    return {scratch.p.get(),x.len};
+  }
   const u64*bits(u32 t)const{return dense.data()+size_t(denseid[t])*words;}
 };
 struct ThreadBuild {
@@ -179,8 +216,12 @@ static void scan_slice(const MMap &docs, const Dict &dict, const char *a, const 
     const char *s=++p, *e=(const char*)memchr(s,'\n',size_t(b-s)); if (!e) e=b;
     lineoff[id]=u32(s-docs.p);
     auto hit=[&](const char*w,const char*z){
-        size_t n=size_t(z-w);u64 h=hash_lower(w,n);u32 c=cache[u32(h)&1023],t=NIL;
-        if(c&&(c>>17)==(u32(h)>>17)&&dict.eq((c&0x1ffffu)-1,w,n,true))t=(c&0x1ffffu)-1;else if((t=dict.find_folded(w,n,h))!=NIL)cache[u32(h)&1023]=(u32(h)&0xfffe0000u)|(t+1);
+        size_t n=size_t(z-w);u32 t=NIL;
+        if(n<=4)t=dict.find_short(w,n);
+        else{
+          u64 h=hash_lower(w,n);u32 c=cache[u32(h)&1023];
+          if(c&&(c>>17)==(u32(h)>>17)&&dict.eq((c&0x1ffffu)-1,w,n,true))t=(c&0x1ffffu)-1;else if((t=dict.find_folded(w,n,h))!=NIL)cache[u32(h)&1023]=(u32(h)&0xfffe0000u)|(t+1);
+        }
         if(t!=NIL){u32 meta=code[t];
           if(meta&0x80000000u)tb.pos.push_back((u64(t)<<32)|u32(w-docs.p));
           if(meta&0x40000000u){u32 index=meta&65535;
@@ -216,20 +257,25 @@ static Index build_index(const MMap &docs, const Dict &dict,std::vector<u32>&lin
   std::vector<std::thread> th; th.reserve(nt);
   for (unsigned i=0;i<nt;i++) th.emplace_back(scan_slice,std::cref(docs),std::cref(dict),cut[i],cut[i+1],std::ref(tb[i]),std::ref(lineoff),std::cref(code),std::ref(densebits),u32(sparseterm.size()),words);
   for (auto &t:th) t.join();
-  Index idx;idx.post.resize(dict.terms.size());idx.denseid=denseid;idx.words=words;
+  Index idx;idx.post.resize(dict.terms.size());idx.sparseid.resize(dict.terms.size(),NIL);idx.chunks.resize(nt);idx.denseid=denseid;idx.words=words;
   size_t total=0;
   for(u32 s=0;s<sparseterm.size();s++){
     u32 term=sparseterm[s],n=0;for(unsigned j=0;j<nt;j++)n+=tb[j].seen_count[s]>>16;
-    idx.post[term]={u32(total),n};total+=n;
+    idx.post[term]={u32(total),n};idx.sparseid[term]=s;total+=n;
   }
   idx.pospost.resize(dict.terms.size());std::vector<u32> pc(dict.terms.size());
   for(auto &x:tb)for(u64 v:x.pos)++pc[u32(v>>32)];size_t ptotal=0;
   for(u32 term=0;term<idx.pospost.size();term++){u32 n=pc[term];idx.pospost[term]={u32(ptotal),n};pc[term]=u32(ptotal);ptotal+=n;}
   idx.posdata.reset(new u32[ptotal]);
   for(unsigned j=0;j<nt;j++){for(u64 x:tb[j].pos){u32 term=u32(x>>32);idx.posdata[pc[term]++]=u32(x);}std::vector<u64>().swap(tb[j].pos);}std::vector<u32>().swap(pc);
-  for(u32 s=0;s<sparseterm.size();s++){u32 term=sparseterm[s],pos=idx.post[term].off;for(unsigned j=0;j<nt;j++){u32 n=tb[j].seen_count[s]>>16;tb[j].seen_count[s]=pos;pos+=n;}}
-  idx.data.reset(new u32[total]);
-  for(unsigned j=0;j<nt;j++){u32 beg=0;for(size_t m=0;m<tb[j].ends.size();m++){u32 end=tb[j].ends[m],doc=tb[j].first+u32(m);for(u32 k=beg;k<end;k++){u32 slot=tb[j].pairs[k];idx.data[tb[j].seen_count[slot]++]=doc;}beg=end;}std::vector<u32>().swap(tb[j].seen_count);std::vector<u16>().swap(tb[j].pairs);std::vector<u32>().swap(tb[j].ends);}
+  for(unsigned j=0;j<nt;j++){
+    auto &c=idx.chunks[j];c.first=tb[j].first;
+    c.start.resize(sparseterm.size()+1);c.start[0]=0;
+    for(u32 s=0;s<sparseterm.size();s++){c.start[s+1]=c.start[s]+(tb[j].seen_count[s]>>16);tb[j].seen_count[s]=c.start[s];}
+    c.data.resize(c.start.back());u32 beg=0;
+    for(size_t m=0;m<tb[j].ends.size();m++){u32 end=tb[j].ends[m];for(u32 k=beg;k<end;k++){u32 slot=tb[j].pairs[k];c.data[tb[j].seen_count[slot]++]=u16(m);}beg=end;}
+    std::vector<u32>().swap(tb[j].seen_count);std::vector<u16>().swap(tb[j].pairs);std::vector<u32>().swap(tb[j].ends);
+  }
   idx.dense=std::move(densebits);
   return idx;
 }
@@ -295,15 +341,15 @@ static bool phrase_at(u32 off,const Query&q,const MMap&docs,const Dict&dict){
   return true;
 }
 
-static Result answer_bool(const Query &q,const Index &idx,std::vector<u32>&a,std::vector<u32>&b,std::vector<u64>&bits) {
-  bool dense=idx.denseid[q.t[0]]!=NIL;if(q.n==1)return dense?summarize_bits(idx.bits(q.t[0]),idx.words):summarize(idx.get(q.t[0]));
-  List cur{};if(dense)bits.assign(idx.bits(q.t[0]),idx.bits(q.t[0])+idx.words);else cur=idx.get(q.t[0]);bool flip=false;
+static Result answer_bool(const Query &q,const Index &idx,std::vector<u32>&a,std::vector<u32>&b,std::vector<u64>&bits,std::array<Scratch,8>&decoded) {
+  bool dense=idx.denseid[q.t[0]]!=NIL;if(q.n==1)return dense?summarize_bits(idx.bits(q.t[0]),idx.words):summarize(idx.get(q.t[0],decoded[0]));
+  List cur{};if(dense)bits.assign(idx.bits(q.t[0]),idx.bits(q.t[0])+idx.words);else cur=idx.get(q.t[0],decoded[0]);bool flip=false;
   for(unsigned k=1;k<q.n;k++){
     u32 t=q.t[k];bool rd=idx.denseid[t]!=NIL,last=k+1==q.n;unsigned char op=q.op[k-1];
-    if(!dense&&!rd){List rhs=idx.get(t);if(last)return summarize_op(op,cur,rhs);std::vector<u32>&out=flip?b:a;flip=!flip;if(op==0)set_inter(cur,rhs,out);else if(op==1)set_unionv(cur,rhs,out);else set_diff(cur,rhs,out);cur=as_list(out);continue;}
+    if(!dense&&!rd){List rhs=idx.get(t,decoded[k]);if(last)return summarize_op(op,cur,rhs);std::vector<u32>&out=flip?b:a;flip=!flip;if(op==0)set_inter(cur,rhs,out);else if(op==1)set_unionv(cur,rhs,out);else set_diff(cur,rhs,out);cur=as_list(out);continue;}
     if(!dense&&rd){const u64*rb=idx.bits(t);if(op!=1){bool keep=op==0;if(last)return summarize_filter(cur,rb,keep);std::vector<u32>&out=flip?b:a;flip=!flip;filter_bits(cur,rb,keep,out);cur=as_list(out);continue;}bits.assign(rb,rb+idx.words);for(u32 i=0;i<cur.n;i++)bits[cur.p[i]>>6]|=1ULL<<(cur.p[i]&63);dense=true;if(last)return summarize_bits(bits.data(),idx.words);continue;}
     if(dense&&rd){const u64*rb=idx.bits(t);for(size_t w=0;w<idx.words;w++){if(op==0)bits[w]&=rb[w];else if(op==1)bits[w]|=rb[w];else bits[w]&=~rb[w];}if(last)return summarize_bits(bits.data(),idx.words);continue;}
-    List rhs=idx.get(t);if(op==0){if(last)return summarize_filter(rhs,bits.data(),true);std::vector<u32>&out=flip?b:a;flip=!flip;filter_bits(rhs,bits.data(),true,out);cur=as_list(out);dense=false;}
+    List rhs=idx.get(t,decoded[k]);if(op==0){if(last)return summarize_filter(rhs,bits.data(),true);std::vector<u32>&out=flip?b:a;flip=!flip;filter_bits(rhs,bits.data(),true,out);cur=as_list(out);dense=false;}
     else{for(u32 i=0;i<rhs.n;i++){u64 m=1ULL<<(rhs.p[i]&63);if(op==1)bits[rhs.p[i]>>6]|=m;else bits[rhs.p[i]>>6]&=~m;}if(last)return summarize_bits(bits.data(),idx.words);}
   }
   return {};
@@ -319,9 +365,9 @@ static std::vector<Result> answer_all(const std::vector<Query>&qs,const Index&id
                                       const std::vector<u32>&lineoff,unsigned nt) {
   std::vector<Result> out(qs.size()); std::atomic<size_t> next{0}; std::vector<std::thread> th;
   for(unsigned z=0;z<nt;z++)th.emplace_back([&]{
-    std::vector<u32>a,b;std::vector<u64>bits;
+    std::vector<u32>a,b;std::vector<u64>bits;std::array<Scratch,8>decoded;
     for(;;){size_t base=next.fetch_add(8,std::memory_order_relaxed);if(base>=qs.size())break;size_t end=std::min(base+8,qs.size());
-      for(size_t i=base;i<end;i++)out[i]=qs[i].phrase?answer_phrase_pos(qs[i],idx,docs,dict,lineoff):answer_bool(qs[i],idx,a,b,bits);}
+      for(size_t i=base;i<end;i++)out[i]=qs[i].phrase?answer_phrase_pos(qs[i],idx,docs,dict,lineoff):answer_bool(qs[i],idx,a,b,bits,decoded);}
   });
   for(auto&t:th)t.join();return out;
 }
@@ -364,7 +410,7 @@ int main(int argc,char**argv){
   std::vector<unsigned char>().swap(needpost);
   std::vector<unsigned char>().swap(posflag);
   std::vector<u32>().swap(sparseid);
-  unsigned nt=std::thread::hardware_concurrency(); if(!nt)nt=1; if(nt>12)nt=12;
+  unsigned nt=std::thread::hardware_concurrency(); if(nt<4)nt=4; if(nt>12)nt=12;
   Index idx=build_index(docs,dict,lineoff,nt,denseid,dense_count,sparseterm,code,ndoc);
   auto rs=answer_all(qs,idx,docs,dict,lineoff,nt);write_results(out,rs);
   return 0;
