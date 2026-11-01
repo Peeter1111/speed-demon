@@ -274,6 +274,8 @@ full T median 1.022 s (runs 1.007 1.008 1.022 1.038 1.063)  memory.peak 116340 K
 
 ## Round 5: Acer phase-led optimization
 
+Scoring-box result of the retained round-5 code (commit b9ecadc): `run-f5b0df3043ce`, T **0.5616 s**, M **90.3 MB**, S 473, K **12.56** (round 3 on the box: `run-cc09d078ef19`, 0.5551 s, 119.3 MB, S 423, K 12.1). Time is flat on the 12-thread box; the gain is the 29 MB memory cut from the round-4 layout, which outweighs the 50 extra counted lines.
+
 All measurements below use the lead's check script (`check1.sh d`) on the Acer test laptop. Every checker run validates sample/full/seed-2-full hashes, runs five timed full trials, measures `memory.peak`, and counts formatted source lines. Source changes are retained only when all hashes remain correct and the checker's printed K increases.
 
 | Trial | Acer median (five times) | Peak KB | Official S | K_acer | Decision |

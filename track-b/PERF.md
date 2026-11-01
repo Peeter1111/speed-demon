@@ -132,6 +132,8 @@ The one-word blocked Bloom profile was re-run after adjacent reversions: tokeniz
 
 ## Round 5: filter/write experiments on the official Acer checker
 
+Scoring-box result of the retained round-5 code (commit b9ecadc): `run-c2460ab05e9c`, T **0.3808 s**, M **98.7 MB**, S 986, K **15.83** (round 3 on the box: `run-46508aa44dab`, 0.4409 s, 106.5 MB, S 970, K 14.53). The box gain (-14% T) is close to the Acer gain against the round-5 starting point (-15%).
+
 Every row below is a complete `check1.sh b` run: seed-1 sample, seed-1 full and seed-2 full hashes all matched before the five timed full runs. Per the Round 5 rule, a change is retained only when the checker-reported `K_acer` rises.
 
 | Step | Change | Acer result | Outcome |
