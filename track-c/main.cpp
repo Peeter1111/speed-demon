@@ -30,7 +30,7 @@ constexpr uint32_t QCAP = 2048, QMASK = QCAP - 1;
 
 constexpr uint64_t BUSY = ~0ULL;
 alignas(64) std::atomic<uint64_t> name_entry[NAME_SLOTS];
-alignas(64) uint64_t name_seen[THREADS][NAME_SLOTS / THREADS][4];
+alignas(64) std::atomic<uint64_t> name_seen[THREADS][NAME_SLOTS / THREADS][4];
 alignas(64) unsigned char name_arena[NAME_ARENA];
 std::atomic<uint32_t> arena_next{0};
 
@@ -63,15 +63,6 @@ struct Agg {
     int64_t id_sum = 0, amount_sum = 0, amount_min = 0, amount_max = 0;
     uint32_t names_distinct = 0;
 };
-
-struct Queue {
-    alignas(64) std::atomic<uint32_t> head{0};
-    alignas(64) std::atomic<uint32_t> tail{0};
-    uint32_t ring[QCAP];
-};
-Queue queues[THREADS][THREADS];
-alignas(64) uint32_t owner_distinct[THREADS][256];
-std::atomic<bool> producer_done[THREADS];
 
 inline uint64_t hash_bytes(const unsigned char* p, uint32_t n) {
     uint64_t a = 0, b = 0;
@@ -165,8 +156,7 @@ inline void code_text(uint16_t n, char out[4]) {
     out[3] = 0;
 }
 
-inline uint32_t name_slot(const Field& name) {
-    uint64_t full = hash_bytes(name.raw, name.raw_len);
+inline uint32_t name_slot(const Field& name, uint64_t full) {
     uint32_t h = static_cast<uint32_t>(full >> 32);
     size_t pos = static_cast<size_t>(full) & NAME_MASK;
     for (;;) {
@@ -196,50 +186,26 @@ inline uint32_t name_slot(const Field& name) {
     }
 }
 
+// Atomic OR makes the distinct-country flag independent of parsing thread.
 inline bool mark_direct(uint32_t slot, uint16_t group) {
-    uint64_t& word = name_seen[slot & (THREADS - 1)][slot / THREADS][group >> 6];
+    auto& word = name_seen[slot & (THREADS - 1)][slot / THREADS][group >> 6];
     uint64_t bit = 1ULL << (group & 63);
-    bool fresh = !(word & bit);
-    word |= bit;
-    return fresh;
-}
-
-inline void process_name(uint32_t owner, uint32_t key) {
-    uint32_t slot = key >> 8, group = key & 255;
-    if (mark_direct(slot, static_cast<uint16_t>(group))) ++owner_distinct[owner][group];
-}
-
-inline void drain_queue(uint32_t owner, uint32_t p) {
-    Queue& q = queues[p][owner];
-    uint32_t h = q.head.load(std::memory_order_relaxed);
-    uint32_t t = q.tail.load(std::memory_order_acquire);
-    if (h == t) return;
-    while (h != t) process_name(owner, q.ring[h++ & QMASK]);
-    q.head.store(h, std::memory_order_release);
-}
-
-inline void drain_names(uint32_t owner) {
-    for (uint32_t p = 0; p < THREADS; ++p) if (p != owner) drain_queue(owner, p);
-}
-
-inline void route_name(uint32_t producer, uint32_t slot, uint16_t group) {
-    uint32_t owner = slot & (THREADS - 1), key = (slot << 8) | group;
-    if (owner == producer) { process_name(owner, key); return; }
-    Queue& q = queues[producer][owner];
-    for (;;) {
-        uint32_t t = q.tail.load(std::memory_order_relaxed);
-        if (t - q.head.load(std::memory_order_acquire) < QCAP) {
-            q.ring[t & QMASK] = key;
-            q.tail.store(t + 1, std::memory_order_release);
-            return;
-        }
-        drain_names(producer);
-    }
+    return !(word.fetch_or(bit, std::memory_order_relaxed) & bit);
 }
 
 void parse_range(const MapFile& records, const unsigned char* p, const unsigned char* end,
                  const uint8_t* region_to_group, uint8_t unmatched, Agg* agg, int tid) {
-    uint32_t tick = 0;
+    // Work a little ahead to hide random interner-table cache misses.
+    struct Pending { Field name; uint64_t hash; uint8_t group; };
+    Pending batch[32];
+    uint32_t used = 0;
+    auto drain = [&] {
+        for (uint32_t i = 0; i < used; ++i) {
+            uint32_t slot = name_slot(batch[i].name, batch[i].hash);
+            if (mark_direct(slot, batch[i].group)) ++agg[batch[i].group].names_distinct;
+        }
+        used = 0;
+    };
     while (p < end) {
         if (end - p >= 3 && p[0] == 0xef && p[1] == 0xbb && p[2] == 0xbf) p += 3;
         uint64_t id = parse_uint(p, ',');
@@ -265,31 +231,12 @@ void parse_range(const MapFile& records, const unsigned char* p, const unsigned 
         a.amount_max = std::max(a.amount_max, cents);
         a.name_bytes += name.value_len;
         a.note_bytes += note.value_len;
-        uint32_t slot = name_slot(name);
-        if (tid < 0) { if (mark_direct(slot, g)) ++a.names_distinct; }
-        else {
-            route_name(static_cast<uint32_t>(tid), slot, g);
-            if (!(++tick & 7)) {
-                uint32_t src = (tick >> 3) & (THREADS - 1);
-                if (src != static_cast<uint32_t>(tid)) drain_queue(static_cast<uint32_t>(tid), src);
-            }
-        }
+        uint64_t full = hash_bytes(name.raw, name.raw_len);
+        __builtin_prefetch(&name_entry[static_cast<size_t>(full) & NAME_MASK], 0, 1);
+        batch[used++] = {name, full, g};
+        if (used == 32) drain();
     }
-    if (tid >= 0) {
-        uint32_t me = static_cast<uint32_t>(tid);
-        producer_done[me].store(true, std::memory_order_release);
-        for (;;) {
-            drain_names(me);
-            bool pending = false;
-            for (uint32_t p2 = 0; p2 < THREADS; ++p2) if (p2 != me) {
-                Queue& q = queues[p2][me];
-                if (!producer_done[p2].load(std::memory_order_acquire) ||
-                    q.head.load(std::memory_order_relaxed) != q.tail.load(std::memory_order_acquire)) { pending = true; break; }
-            }
-            if (!pending) break;
-            asm volatile("pause");
-        }
-    }
+    drain();
 }
 
 void format_money(FILE* f, int64_t cents) {
@@ -404,8 +351,6 @@ int main(int argc, char** argv) {
             z.name_bytes += a.name_bytes;
             z.note_bytes += a.note_bytes;
         }
-        for (size_t owner = 0; owner < THREADS; ++owner)
-            for (size_t g = 0; g <= unmatched; ++g) agg[g].names_distinct += owner_distinct[owner][g];
     }
     const double t_parse = now_s();
 

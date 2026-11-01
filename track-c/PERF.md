@@ -1,6 +1,33 @@
 # Track C: performance log
 
-## Round 3 — official Acer seed-1 sample/full and full-size seed 2
+## Round 5: hybrid structural scanner and compact name interner
+
+Measurements are from the lead's check script (`check1.sh c`) on the Acer test laptop; all SHA gates include sample, seed-1 full, and independent seed-2 full. Note that `memory.peak` varies sharply across identical source runs on the shared laptop; decisions use the printed K rather than assuming stable memory.
+
+| Step | Experiment | SHA sample/full/full2 | Median Acer full T | Peak KB | Official S | K_acer | Verdict |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| R5-0 | Copied unchanged Round 3 baseline | OK/OK/OK | 0.103 s (0.102, 0.103, 0.103, 0.110, 0.110) | 26,076 | 504 | 14.8 | Starting baseline; preserve |
+| R5-18 | Keep batch-32 delayed name lookups but remove the interner-slot prefetch | OK/OK/OK | 0.096 s (0.091, 0.095, 0.096, 0.097, 0.098) | 26,588 | 439 | 15.6 | **REVERT**: the prefetch call genuinely helped hide lookup latency; no benefit from batching alone. |
+| R5-17 | Reduce prefetch batch from 32 to 8 names | OK/OK/OK | 0.094 s (0.091, 0.092, 0.094, 0.095, 0.097) | 26,460 | 441 | 15.7 | **REVERT**: speed within noise but worse K than 32 (16.6). |
+| R5-16 | Batch-32 second-stage prefetch of the cached representative name when the probed slot fingerprint matched | OK/OK/OK | 0.099 s (0.095, 0.097, 0.099, 0.100, 0.100) | 26,552 | 448 | 15.3 | **REVERT**: extra load and second prefetch pass costs more than it hides. |
+| R5-15 | Change interner prefetch hint from low locality (1) to high locality (3), batch 32 | OK/OK/OK | 0.096 s (0.092, 0.094, 0.096, 0.106, 0.116) | 26,832 | 441 | 15.6 | **REVERT**: no improvement, slightly slower and less stable. |
+| R5-14 | Increase prefetch batch size 32 -> 64 | OK/OK/OK | 0.094 s (0.094, 0.094, 0.094, 0.094, 0.095) | 26,552 | 441 | 15.7 | **REVERT**: no enough speed gain to repay this run's larger peak; batch 32 K 16.6. |
+| R5-13 | Increase prefetch batch from 16 to 32 name lookups | OK/OK/OK | 0.095 s (0.091, 0.094, 0.095, 0.095, 0.095) | 20,128 | 441 | 16.6 | **KEEP provisionally**: ties batch-16 speed, slightly better reported K (within normal noise). |
+| R5-12 | Pipeline 16 record names: compute CRC while parsing, prefetch candidate interner slot, batch exact lookup/country flag updates | OK/OK/OK | 0.094 s (0.092, 0.092, 0.094, 0.096, 0.109); confirm 0.095 s (0.092, 0.094, 0.095, 0.095, 0.096) | 26,812; confirm 20,132 | 441 | 15.7; confirm 16.5 | **KEEP** after confirmation: prefetch overlap cuts ~6–7 ms, equal memory footprint on second check and improves K over R5-2 16.1. Initial build missing local batch declaration, fixed before successful checks. |
+| R5-11 | Probe collision chains in stride 4 instead of stride 8 for more cache-line locality | OK/OK/OK | 0.104 s (0.102, 0.102, 0.104, 0.104, 0.108) | 26,824 | 423 | 15.0 | **REVERT**: higher K from original stride 8, despite potential cache locality. |
+| R5-10 | Replace libc equality on cached exact names up to 16 bytes with masked 64-bit loads (8-byte first+tail comparisons) | OK/OK/OK | 0.103 s (0.100, 0.100, 0.103, 0.103, 0.103) | 26,476 | 444 | 15.0 | **REVERT**: 21 extra formatted lines with no K improvement, no correctness loss. |
+| R5-9 | Use 32-bit atomics for country bits rather than 64-bit (8 x 32-bit words per slot, identical footprint) | OK/OK/OK | 0.103 s (0.101, 0.101, 0.103, 0.104, 0.107) | 26,560 | 423 | 15.1 | **REVERT**: no K gain versus R5-2 16.1. |
+| R5-8 | Change each atomic 64-bit country-mask word to 8-bit byte (32 bytes per slot unchanged) | OK/OK/OK | 0.108 s (0.106, 0.108, 0.108, 0.110, 0.112) | 25,280 | 423 | 14.9 | **REVERT**: byte atomics slower, no code/memory savings. |
+| R5-7 | Relaxed non-atomic read before the fetch-or for already-seen name/country pairs | OK/OK/OK | 0.109 s (0.107, 0.109, 0.109, 0.109, 0.112) | 24,480 | 425 | 14.9 | **REVERT**: additional read/branch is slower than unconditional locked OR. |
+| R5-6 | Double exact interner and country mask capacity from 2^17 to 2^18 slots to cut collisions | OK/OK/OK | 0.121 s (0.120, 0.121, 0.121, 0.121, 0.122) | 31,548 | 423 | 13.5 | **REVERT**: extra cache working set and 5 MiB increase in memory dominated reduced probing. |
+| R5-5 | Switch interner from stride-8 probe to linear probe now that country masks are atomic and ownership-independent | OK/OK/OK | 0.106 s (0.104, 0.104, 0.106, 0.106, 0.106) | 26,644 | 423 | 14.9 | **REVERT**: poorer time and K than R5-2. |
+| R5-4 | Replace global atomic country bitmap with eight thread-local 4-word masks per name and exact OR/popcount after parsing | OK/OK/OK | 0.134 s (0.131, 0.132, 0.134, 0.135, 0.148) | 53,520 | 432 | 11.5 | **REVERT**: 33 MiB extra bitmaps and serial union outweighed locked-OR savings; first check unable to copy due transient scp connection closure, second check succeeded. |
+| R5-3 | One CRC32C computed over length/folded head+tail for both probe index and fingerprint, instead of two separate CRCs | OK/OK/OK | 0.102 s (0.100, 0.101, 0.102, 0.102, 0.105) | 26,664 | 420 | 15.2 | **REVERT**: 3 fewer lines but poorer K than R5-2 confirmation 16.1; slow memory footprint/no gain. |
+| R5-2 | Replace SPSC name-owner routing/queues with a single atomic country-bit `fetch_or` per interned name. Remove queue-draining, owner accumulator and end-of-stream synchronization. | OK/OK/OK | 0.105 s (0.100, 0.101, 0.105, 0.109, 0.126); confirm 0.101 s (0.101, 0.101, 0.101, 0.103, 0.104) | 20,136; confirm 20,120 | 423 | 15.9; confirm 16.1 | **KEEP**: both K measurements above 14.8 baseline; removes 81 formatted lines, preserves SHA correctness. |
+| R5-1 | Replace scalar record parser with R4 AVX2 64-byte masks/PCLMUL structural scanner, retain BOM-cut parallel ranges and R3 global compact name arena/owner queues, no quote-parity prepass | OK/OK/OK | 0.116 s (0.113, 0.115, 0.116, 0.117, 0.118) | 25,840 | 572 | 13.7 | **REVERT**: scanner+per-record name queue/intern overhead exceeds former scalar parsing and adds 68 formatted lines. First build failed due to unimported `u8` alias, corrected before measurement. |
+
+
+## Round 3: official Acer seed-1 sample/full and full-size seed 2
 
 | Step | Change | Official checker | Verdict |
 |---|---|---|---|
@@ -30,9 +57,9 @@ No live-board run was performed by this worker. The project rules forbid signing
 
 | Step | Change | Run ID | T (s) | M (MB) | Result |
 |---|---|---|---:|---:|---|
-| 0 | Official Python reference | — | 14.44 scoring-box reference | 367 scoring-box reference | authoritative baseline |
-| 1 | initial mmap/direct-map parser with per-(country,name) sharded set | — | 0.57 sample median | 152.2 sample | correct seed-1 sample |
-| 2 | one global name interner + 256-bit country mask; six BOM-boundary workers | — | 0.08 sample median | 37.0 sample | correct seed-1, seed-7, seed-13 samples |
+| 0 | Official Python reference | n/a | 14.44 scoring-box reference | 367 scoring-box reference | authoritative baseline |
+| 1 | initial mmap/direct-map parser with per-(country,name) sharded set | n/a | 0.57 sample median | 152.2 sample | correct seed-1 sample |
+| 2 | one global name interner + 256-bit country mask; six BOM-boundary workers | n/a | 0.08 sample median | 37.0 sample | correct seed-1, seed-7, seed-13 samples |
 
 MEASURED cloud detail: final seed-1 sample was 7 runs = 0.07, 0.07, 0.13, 0.11, 0.08, 0.07, 0.10 s; median 0.08 s, median peak RSS 37,864 KB. The Python reference on the same cloud data had 3 runs = 11.55, 9.27, 10.39 s; median 10.39 s, median 326,260 KB. Cloud scheduling/cache variance is large, so only the order of magnitude is useful.
 
@@ -44,7 +71,7 @@ Source-size proxy: `main.cpp` has 370 physical / 348 nonblank lines; Dockerfile 
 
 No board run IDs are invented. The next meaningful measurements are the actual Acer/scoring topology and the complete official full seed.
 
-## Round 2 — Acer official check1.sh
+## Round 2: Acer official check1.sh
 
 All rows below use the lead's `check1.sh`: it rebuilds with `g++ -std=gnu++20 -O3 -march=x86-64-v3 -DNDEBUG -pthread`, verifies sample and full SHA, takes the median of five full runs, measures cgroup `memory.peak`, and reports the Acer K estimate.
 

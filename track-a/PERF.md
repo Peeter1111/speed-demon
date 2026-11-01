@@ -69,7 +69,7 @@ Measurement note: round 3's own S estimates were taken before formatting and wer
 970 counted). The official counter formats each file with `clang-format --style=LLVM` (80 columns) first, so
 long lines are split and dense code does not save lines.
 
-## Round 3 — official Acer checks (sample, full, and independent full seed 2)
+## Round 3: official Acer checks (sample, full, and independent full seed 2)
 
 All figures use the lead's unchanged `flock ... check1.sh a <src>` command; the full2 SHA check is now mandatory. Host load produces large timing variation (notably 0.075–0.130 s inside five-run checks), so changes are not claimed on one cherry-picked run. The source began as round 2 K12, with its full log retained below.
 
@@ -118,7 +118,7 @@ Temporary phase-instrumented *unchanged round-2* `../profile.cpp` (outside the s
 
 At 8 threads the two input scans together consume roughly 51–73 ms, with a 25–28 ms byte-sum floor for *one* scan. The separate serial output formatting costs another 18–28 ms, so K1 parallelizes formatting alongside percentile selection while writing in sorted hour order. No segment is falsely called `mmap` time: actual memory-map/open startup is negligible; mapping fault and reading costs accrue to scan time.
 
-## Round 2 — official Acer measurements
+## Round 2: official Acer measurements
 
 All round-2 timings below come from the lead's official `check1.sh` command under `flock`, unless a row is explicitly labelled as phase instrumentation. Every kept/reverted optimization is judged against the exact sample and full SHA checks printed by that command.
 
