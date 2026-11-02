@@ -21,7 +21,6 @@ namespace {
 inline double now_s() { timespec t{}; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 constexpr uint8_t NONE = 0xff;
 constexpr uint32_t REGION_CAP = 1'000'000;
-constexpr size_t REGION_WORDS = (REGION_CAP + 63) / 64;
 constexpr size_t THREADS = 8;
 constexpr size_t NAME_SLOTS = 1u << 17;
 constexpr size_t NAME_MASK = NAME_SLOTS - 1;
@@ -29,9 +28,15 @@ constexpr uint32_t QCAP = 2048, QMASK = QCAP - 1;
 
 alignas(64) std::atomic<uint64_t> name_entry[NAME_SLOTS];
 alignas(64) uint64_t name_seen[THREADS][NAME_SLOTS / THREADS][4];
-alignas(64) uint64_t region_bits[REGION_WORDS];
-alignas(64) uint32_t region_rank[REGION_WORDS];
-alignas(64) uint8_t region_group[200'000];
+alignas(64) uint8_t region_group[REGION_CAP];
+struct Queue {
+    alignas(64) std::atomic<uint32_t> head{0};
+    alignas(64) std::atomic<uint32_t> tail{0};
+    uint32_t ring[QCAP];
+};
+Queue queues[THREADS][THREADS];
+alignas(64) uint32_t owner_distinct[THREADS][256];
+std::atomic<bool> producer_done[THREADS];
 
 struct MapFile {
     const unsigned char* p = nullptr;
@@ -64,25 +69,25 @@ struct Agg {
 };
 
 inline uint64_t hash_bytes(const unsigned char* p, uint32_t n) {
-    uint64_t h = 0x9e3779b97f4a7c15ULL ^ static_cast<uint64_t>(n) * 0xd6e8feb86659fd93ULL;
+    uint64_t a = 0x9e3779b97f4a7c15ULL ^ n;
+    uint64_t b = 0xd6e8feb86659fd93ULL ^ (static_cast<uint64_t>(n) << 17);
     uint32_t left = n;
     while (left >= 8) {
         uint64_t x;
         std::memcpy(&x, p, 8);
-        h ^= x;
-        h *= 0xa0761d6478bd642fULL;
-        h = (h << 27) | (h >> 37);
+        a = _mm_crc32_u64(a, x);
+        // Multiply each block in the second stream: different CRC seeds alone
+        // are affine-related and would give only 32 effective hash bits.
+        b = _mm_crc32_u64(b, x * 0xa0761d6478bd642fULL);
         p += 8;
         left -= 8;
     }
     uint64_t tail = 0;
     if (left) std::memcpy(&tail, p, left);
-    h ^= tail ^ (static_cast<uint64_t>(left) << 56);
-    h *= 0xe7037ed1a0b428dbULL;
-    h ^= h >> 32;
-    h *= 0x8ebc6af09c88c6e3ULL;
-    h ^= h >> 29;
-    return h;
+    a = _mm_crc32_u64(a, tail ^ (static_cast<uint64_t>(left) << 56));
+    b = _mm_crc32_u64(b, (tail ^ (static_cast<uint64_t>(left) << 48)) *
+                             0x9e3779b97f4a7c15ULL);
+    return (a << 32) | static_cast<uint32_t>(b);
 }
 
 inline uint64_t parse_uint(const unsigned char*& p, unsigned char stop) {
@@ -183,11 +188,50 @@ inline uint32_t name_slot(uint64_t full) {
     }
 }
 
-// Atomic OR makes the distinct-country flag independent of parsing thread.
+// Each slot belongs to one worker. The other workers send it events by SPSC queues.
+// Thus no atomic RMWs or inter-worker cache-line ownership on the bitmap.
 inline bool mark_direct(uint32_t slot, uint16_t group) {
-    auto& word = name_seen[slot & (THREADS - 1)][slot / THREADS][group >> 6];
+    uint64_t& word = name_seen[slot & (THREADS - 1)][slot / THREADS][group >> 6];
     uint64_t bit = 1ULL << (group & 63);
-    return !(__atomic_fetch_or(&word, bit, __ATOMIC_RELAXED) & bit);
+    bool fresh = !(word & bit);
+    word |= bit;
+    return fresh;
+}
+
+inline void process_name(uint32_t owner, uint32_t key) {
+    uint32_t slot = key >> 8, group = key & 255;
+    if (mark_direct(slot, static_cast<uint16_t>(group)))
+        ++owner_distinct[owner][group];
+}
+
+inline void drain_queue(uint32_t owner, uint32_t producer) {
+    Queue& q = queues[producer][owner];
+    uint32_t h = q.head.load(std::memory_order_relaxed);
+    uint32_t t = q.tail.load(std::memory_order_acquire);
+    if (h == t) return;
+    while (h != t) process_name(owner, q.ring[h++ & QMASK]);
+    q.head.store(h, std::memory_order_release);
+}
+
+inline void drain_names(uint32_t owner) {
+    for (uint32_t p = 0; p < THREADS; ++p)
+        if (p != owner) drain_queue(owner, p);
+}
+
+inline void route_name(uint32_t producer, uint32_t slot, uint16_t group) {
+    uint32_t owner = slot & (THREADS - 1);
+    uint32_t key = (slot << 8) | group;
+    if (owner == producer) { process_name(owner, key); return; }
+    Queue& q = queues[producer][owner];
+    for (;;) {
+        uint32_t t = q.tail.load(std::memory_order_relaxed);
+        if (t - q.head.load(std::memory_order_acquire) < QCAP) {
+            q.ring[t & QMASK] = key;
+            q.tail.store(t + 1, std::memory_order_release);
+            return;
+        }
+        drain_names(producer);
+    }
 }
 
 void parse_range(const MapFile& records, const unsigned char* p, const unsigned char* end,
@@ -196,12 +240,21 @@ void parse_range(const MapFile& records, const unsigned char* p, const unsigned 
     struct Pending { uint64_t hash; uint8_t group; };
     Pending batch[32];
     uint32_t used = 0;
+    uint32_t visit = 0;
     auto drain = [&] {
         for (uint32_t i = 0; i < used; ++i) {
             uint32_t slot = name_slot(batch[i].hash);
-            if (mark_direct(slot, batch[i].group)) ++agg[batch[i].group].names_distinct;
+            if (tid < 0) {
+                if (mark_direct(slot, batch[i].group))
+                    ++agg[batch[i].group].names_distinct;
+            } else route_name(static_cast<uint32_t>(tid), slot, batch[i].group);
         }
         used = 0;
+        if (tid >= 0) {
+            uint32_t src = (++visit) & (THREADS - 1);
+            if (src != static_cast<uint32_t>(tid))
+                drain_queue(static_cast<uint32_t>(tid), src);
+        }
     };
     while (p < end) {
         if (end - p >= 3 && p[0] == 0xef && p[1] == 0xbb && p[2] == 0xbf) p += 3;
@@ -209,6 +262,7 @@ void parse_range(const MapFile& records, const unsigned char* p, const unsigned 
         Field name = parse_text(p, end);
         Field note = parse_text(p, end);
         uint32_t rid = static_cast<uint32_t>(parse_uint(p, ','));
+        if (rid < REGION_CAP) __builtin_prefetch(region_group + rid, 0, 1);
         int64_t cents = parse_cents(p);
         if (p == end) {
         } else if (*p == '\r' && p + 1 < end && p[1] == '\n') p += 2;
@@ -217,14 +271,7 @@ void parse_range(const MapFile& records, const unsigned char* p, const unsigned 
             std::fputs("bad record terminator\n", stderr);
             std::exit(3);
         }
-        uint8_t g = NONE;
-        if (rid < REGION_CAP) {
-            const uint32_t wi = rid >> 6;
-            const uint64_t word = region_bits[wi];
-            const uint64_t bit = 1ULL << (rid & 63);
-            if (word & bit)
-                g = region_group[region_rank[wi] + __builtin_popcountll(word & (bit - 1))];
-        }
+        uint8_t g = rid < REGION_CAP ? region_group[rid] : NONE;
         if (g == NONE) g = unmatched;
         Agg& a = agg[g];
         if (!a.count) a.amount_min = a.amount_max = cents;
@@ -241,6 +288,26 @@ void parse_range(const MapFile& records, const unsigned char* p, const unsigned 
         if (used == 32) drain();
     }
     drain();
+    if (tid >= 0) {
+        uint32_t me = static_cast<uint32_t>(tid);
+        producer_done[me].store(true, std::memory_order_release);
+        for (;;) {
+            drain_names(me);
+            bool pending = false;
+            for (uint32_t p2 = 0; p2 < THREADS; ++p2) {
+                if (p2 == me) continue;
+                Queue& q = queues[p2][me];
+                if (!producer_done[p2].load(std::memory_order_acquire) ||
+                    q.head.load(std::memory_order_relaxed) !=
+                        q.tail.load(std::memory_order_acquire)) {
+                    pending = true;
+                    break;
+                }
+            }
+            if (!pending) break;
+            _mm_pause();
+        }
+    }
 }
 
 void format_money(FILE* f, int64_t cents) {
@@ -265,7 +332,7 @@ int main(int argc, char** argv) {
     code_to_group.fill(-1);
     std::array<uint16_t, 256> group_code{};
     uint16_t groups = 0;
-    uint32_t regions_used = 0;
+    std::memset(region_group, NONE, sizeof(region_group));
 
     const unsigned char* p = regions.p;
     const unsigned char* end = regions.p + regions.n;
@@ -289,19 +356,12 @@ int main(int argc, char** argv) {
             code_to_group[cn] = g;
             group_code[g] = cn;
         }
-        region_bits[id >> 6] |= 1ULL << (id & 63);
-        region_group[regions_used++] = static_cast<uint8_t>(g);
+        region_group[id] = static_cast<uint8_t>(g);
     }
     if (groups > 255) {
         std::fputs("too many countries\n", stderr);
         return 3;
     }
-    uint32_t rank = 0;
-    for (size_t i = 0; i < REGION_WORDS; ++i) {
-        region_rank[i] = rank;
-        rank += static_cast<uint32_t>(__builtin_popcountll(region_bits[i]));
-    }
-    if (rank != regions_used) return 3;
     const uint8_t unmatched = static_cast<uint8_t>(groups);
     const double t_regions = now_s();
 
@@ -362,6 +422,9 @@ int main(int argc, char** argv) {
             z.name_bytes += a.name_bytes;
             z.note_bytes += a.note_bytes;
         }
+        for (size_t owner = 0; owner < THREADS; ++owner)
+            for (size_t g = 0; g <= unmatched; ++g)
+                agg[g].names_distinct += owner_distinct[owner][g];
     }
     const double t_parse = now_s();
 

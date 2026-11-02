@@ -176,8 +176,7 @@ struct Index {
   std::vector<Chunk> chunks;
   std::vector<Posting> post;
   std::vector<u32> sparseid;
-  std::unique_ptr<u32[]> posdata;
-  std::vector<Posting> pospost;
+  std::vector<u64> phrase_hits;
   std::vector<u64> dense;
   std::vector<u32> denseid;
   size_t words=0;
@@ -195,18 +194,20 @@ struct Index {
 };
 struct ThreadBuild {
   // Each sparse posting is a 16-bit query-term index, in document order.
-  // Phrase anchor occurrences pack (term_id, byte_offset) into one 64-bit value.
+  // Store only verified phrase hits, packed as (query_id, document_id).
   std::vector<u16> pairs;
   std::vector<u32> ends;
-  std::vector<u64> pos;
+  std::vector<u64> phrase_hits;
   std::vector<u32> seen_count;
   std::vector<u16> dense_seen;
   u32 first=NIL;
-  ThreadBuild(size_t dense,size_t reserve_pairs,size_t reserve_pos):dense_seen(dense){pairs.reserve(reserve_pairs);ends.reserve(40000);pos.reserve(reserve_pos);}
+  ThreadBuild(size_t dense,size_t reserve_pairs):dense_seen(dense){pairs.reserve(reserve_pairs);ends.reserve(40000);phrase_hits.reserve(1024);}
 };
 
+static bool phrase_at(u32 off,const Query&q,const MMap&docs,const Dict&dict);
 static void scan_slice(const MMap &docs, const Dict &dict, const char *a, const char *b,
-                       ThreadBuild &tb,std::vector<u32>&lineoff,
+                       ThreadBuild &tb,const std::vector<Query>&queries,
+                       const std::vector<u32>&phrase_start,const std::vector<u32>&phrase_query,
                        const std::vector<u32>&code,std::vector<u64>&densebits,u32 sparse_count,size_t words) {
   const char *p=a;u32 cache[1024]{};
   while (p<b) {
@@ -214,7 +215,6 @@ static void scan_slice(const MMap &docs, const Dict &dict, const char *a, const 
     if(tb.first==NIL)tb.first=id;
     if (p>=b || *p!='\t') { std::fprintf(stderr,"bad docs line\n"); std::exit(2); }
     const char *s=++p, *e=(const char*)memchr(s,'\n',size_t(b-s)); if (!e) e=b;
-    lineoff[id]=u32(s-docs.p);
     auto hit=[&](const char*w,const char*z){
         size_t n=size_t(z-w);u32 t=NIL;
         if(n<=4)t=dict.find_short(w,n);
@@ -223,7 +223,13 @@ static void scan_slice(const MMap &docs, const Dict &dict, const char *a, const 
           if(c&&(c>>17)==(u32(h)>>17)&&dict.eq((c&0x1ffffu)-1,w,n,true))t=(c&0x1ffffu)-1;else if((t=dict.find_folded(w,n,h))!=NIL)cache[u32(h)&1023]=(u32(h)&0xfffe0000u)|(t+1);
         }
         if(t!=NIL){u32 meta=code[t];
-          if(meta&0x80000000u)tb.pos.push_back((u64(t)<<32)|u32(w-docs.p));
+          if(meta&0x80000000u){
+            for(u32 j=phrase_start[t];j<phrase_start[t+1];j++){
+              u32 qi=phrase_query[j];
+              if(phrase_at(u32(w-docs.p),queries[qi],docs,dict))
+                tb.phrase_hits.push_back((u64(qi)<<32)|id);
+            }
+          }
           if(meta&0x40000000u){u32 index=meta&65535;
             if(meta&0x20000000u){u16 stamp=u16(tb.ends.size()+1);if(tb.dense_seen[index]!=stamp){tb.dense_seen[index]=stamp;densebits[size_t(index)*words+(id>>6)]|=1ULL<<(id&63);}}
             else tb.pairs.push_back((u16)index);
@@ -240,7 +246,8 @@ static void scan_slice(const MMap &docs, const Dict &dict, const char *a, const 
   tb.seen_count.resize(sparse_count);u32 beg=0,out=0;for(size_t m=0;m<tb.ends.size();m++){u32 end=tb.ends[m];u16 stamp=u16(m+1);for(u32 k=beg;k<end;k++){u32 s=tb.pairs[k];u32&sc=tb.seen_count[s];if(u16(sc)!=stamp){sc=(sc&0xffff0000u)+0x10000u+stamp;tb.pairs[out++]=(u16)s;}}tb.ends[m]=out;beg=end;}tb.pairs.resize(out);std::vector<u16>().swap(tb.dense_seen);
 }
 
-static Index build_index(const MMap &docs, const Dict &dict,std::vector<u32>&lineoff,unsigned nt,
+static Index build_index(const MMap &docs, const Dict &dict,const std::vector<Query>&queries,
+                       const std::vector<u32>&phrase_start,const std::vector<u32>&phrase_query,unsigned nt,
                        const std::vector<u32>&denseid,u32 dense_count,
                        const std::vector<u32>&sparseterm,const std::vector<u32>&code,u32 ndoc) {
   size_t words=(ndoc+63)/64;std::vector<u64>densebits(size_t(dense_count)*words);
@@ -253,9 +260,9 @@ static Index build_index(const MMap &docs, const Dict &dict,std::vector<u32>&lin
     cut[i]=p;
   }
   std::vector<ThreadBuild> tb; tb.reserve(nt);
-  for (unsigned i=0;i<nt;i++) tb.emplace_back(dense_count,size_t(cut[i+1]-cut[i])/20+40000,size_t(cut[i+1]-cut[i])/180+2000);
+  for (unsigned i=0;i<nt;i++) tb.emplace_back(dense_count,size_t(cut[i+1]-cut[i])/20+40000);
   std::vector<std::thread> th; th.reserve(nt);
-  for (unsigned i=0;i<nt;i++) th.emplace_back(scan_slice,std::cref(docs),std::cref(dict),cut[i],cut[i+1],std::ref(tb[i]),std::ref(lineoff),std::cref(code),std::ref(densebits),u32(sparseterm.size()),words);
+  for (unsigned i=0;i<nt;i++) th.emplace_back(scan_slice,std::cref(docs),std::cref(dict),cut[i],cut[i+1],std::ref(tb[i]),std::cref(queries),std::cref(phrase_start),std::cref(phrase_query),std::cref(code),std::ref(densebits),u32(sparseterm.size()),words);
   for (auto &t:th) t.join();
   Index idx;idx.post.resize(dict.terms.size());idx.sparseid.resize(dict.terms.size(),NIL);idx.chunks.resize(nt);idx.denseid=denseid;idx.words=words;
   size_t total=0;
@@ -263,11 +270,11 @@ static Index build_index(const MMap &docs, const Dict &dict,std::vector<u32>&lin
     u32 term=sparseterm[s],n=0;for(unsigned j=0;j<nt;j++)n+=tb[j].seen_count[s]>>16;
     idx.post[term]={u32(total),n};idx.sparseid[term]=s;total+=n;
   }
-  idx.pospost.resize(dict.terms.size());std::vector<u32> pc(dict.terms.size());
-  for(auto &x:tb)for(u64 v:x.pos)++pc[u32(v>>32)];size_t ptotal=0;
-  for(u32 term=0;term<idx.pospost.size();term++){u32 n=pc[term];idx.pospost[term]={u32(ptotal),n};pc[term]=u32(ptotal);ptotal+=n;}
-  idx.posdata.reset(new u32[ptotal]);
-  for(unsigned j=0;j<nt;j++){for(u64 x:tb[j].pos){u32 term=u32(x>>32);idx.posdata[pc[term]++]=u32(x);}std::vector<u64>().swap(tb[j].pos);}std::vector<u32>().swap(pc);
+  size_t hits=0;for(auto &x:tb)hits+=x.phrase_hits.size();
+  idx.phrase_hits.reserve(hits);
+  for(auto &x:tb){idx.phrase_hits.insert(idx.phrase_hits.end(),x.phrase_hits.begin(),x.phrase_hits.end());std::vector<u64>().swap(x.phrase_hits);}
+  std::sort(idx.phrase_hits.begin(),idx.phrase_hits.end());
+  idx.phrase_hits.erase(std::unique(idx.phrase_hits.begin(),idx.phrase_hits.end()),idx.phrase_hits.end());
   for(unsigned j=0;j<nt;j++){
     auto &c=idx.chunks[j];c.first=tb[j].first;
     c.start.resize(sparseterm.size()+1);c.start[0]=0;
@@ -354,20 +361,14 @@ static Result answer_bool(const Query &q,const Index &idx,std::vector<u32>&a,std
   }
   return {};
 }
-static Result answer_phrase_pos(const Query&q,const Index&idx,const MMap&docs,const Dict&dict,const std::vector<u32>&lineoff){
-  const Posting&p=idx.pospost[q.t[q.anchor]];Result r;u32 skip=0;
-  for(u32 i=0;i<p.len;i++){u32 off=idx.posdata[p.off+i];if(off<skip)continue;
-    if(phrase_at(off,q,docs,dict)){u32 doc=u32(std::upper_bound(lineoff.begin(),lineoff.end(),off)-lineoff.begin()-1);add_result(r,doc);skip=lineoff[doc+1];}}
-  return r;
-}
-
-static std::vector<Result> answer_all(const std::vector<Query>&qs,const Index&idx,const MMap&docs,const Dict&dict,
-                                      const std::vector<u32>&lineoff,unsigned nt) {
-  std::vector<Result> out(qs.size()); std::atomic<size_t> next{0}; std::vector<std::thread> th;
+static std::vector<Result> answer_all(const std::vector<Query>&qs,const Index&idx,unsigned nt) {
+  std::vector<Result> out(qs.size());
+  for(u64 hit:idx.phrase_hits)add_result(out[u32(hit>>32)],u32(hit));
+  std::atomic<size_t> next{0}; std::vector<std::thread> th;
   for(unsigned z=0;z<nt;z++)th.emplace_back([&]{
     std::vector<u32>a,b;std::vector<u64>bits;std::array<Scratch,8>decoded;
     for(;;){size_t base=next.fetch_add(8,std::memory_order_relaxed);if(base>=qs.size())break;size_t end=std::min(base+8,qs.size());
-      for(size_t i=base;i<end;i++)out[i]=qs[i].phrase?answer_phrase_pos(qs[i],idx,docs,dict,lineoff):answer_bool(qs[i],idx,a,b,bits,decoded);}
+      for(size_t i=base;i<end;i++)if(!qs[i].phrase)out[i]=answer_bool(qs[i],idx,a,b,bits,decoded);}
   });
   for(auto&t:th)t.join();return out;
 }
@@ -393,7 +394,13 @@ int main(int argc,char**argv){
   if(docs.n>=(1ULL<<32)||ndoc>=(1u<<18)||dict.terms.size()>=(1u<<18)){
     std::fprintf(stderr,"corpus exceeds Track B index bounds\n");return 2;
   }
-  std::vector<u32>lineoff(ndoc+1);lineoff[ndoc]=u32(docs.n);
+  // Compact index of which phrase queries use each term as their anchor.
+  std::vector<u32>phrase_start(dict.terms.size()+1);
+  for(auto&q:qs)if(q.phrase)++phrase_start[q.t[q.anchor]+1];
+  for(size_t i=1;i<phrase_start.size();i++)phrase_start[i]+=phrase_start[i-1];
+  std::vector<u32>phrase_query(phrase_start.back()),cursor=phrase_start;
+  for(u32 i=0;i<qs.size();i++)if(qs[i].phrase)phrase_query[cursor[qs[i].t[qs[i].anchor]]++]=i;
+  std::vector<u32>().swap(cursor);
   // Frequent boolean query terms use bitmaps; sparse ones use sorted postings.
   std::vector<u32>denseid(dict.terms.size(),NIL);u32 dense_count=0;for(u32 t=0;t<denseid.size();t++)if(needpost[t]&&uses[t]>22)denseid[t]=dense_count++;
   std::vector<u32>sparseid(dict.terms.size(),NIL),sparseterm;for(u32 t=0;t<sparseid.size();t++)if(needpost[t]&&denseid[t]==NIL){sparseid[t]=(u32)sparseterm.size();sparseterm.push_back(t);}
@@ -411,7 +418,7 @@ int main(int argc,char**argv){
   std::vector<unsigned char>().swap(posflag);
   std::vector<u32>().swap(sparseid);
   unsigned nt=std::thread::hardware_concurrency(); if(nt<4)nt=4; if(nt>12)nt=12;
-  Index idx=build_index(docs,dict,lineoff,nt,denseid,dense_count,sparseterm,code,ndoc);
-  auto rs=answer_all(qs,idx,docs,dict,lineoff,nt);write_results(out,rs);
+  Index idx=build_index(docs,dict,qs,phrase_start,phrase_query,nt,denseid,dense_count,sparseterm,code,ndoc);
+  auto rs=answer_all(qs,idx,nt);write_results(out,rs);
   return 0;
 }
