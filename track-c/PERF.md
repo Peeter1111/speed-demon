@@ -2,9 +2,9 @@
 
 ## Round 5: hybrid structural scanner and compact name interner
 
-Measurements are from the lead's check script (`check1.sh c`) on the Acer test laptop; all SHA gates include sample, seed-1 full, and independent seed-2 full. Note that `memory.peak` varies sharply across identical source runs on the shared laptop; decisions use the printed K rather than assuming stable memory.
+Measurements are from the supplied check script (`check1.sh c`) on the test laptop; all SHA gates include sample, seed-1 full, and independent seed-2 full. Note that `memory.peak` varies sharply across identical source runs on the shared laptop; decisions use the printed K rather than assuming stable memory.
 
-| Step | Experiment | SHA sample/full/full2 | Median Acer full T | Peak KB | Official S | K_acer | Verdict |
+| Step | Experiment | SHA sample/full/full2 | Media test-laptop full T | Peak KB | Official S | K_test | Verdict |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
 | R5-0 | Copied unchanged Round 3 baseline | OK/OK/OK | 0.103 s (0.102, 0.103, 0.103, 0.110, 0.110) | 26,076 | 504 | 14.8 | Starting baseline; preserve |
 | R5-18 | Keep batch-32 delayed name lookups but remove the interner-slot prefetch | OK/OK/OK | 0.096 s (0.091, 0.095, 0.096, 0.097, 0.098) | 26,588 | 439 | 15.6 | **REVERT**: the prefetch call genuinely helped hide lookup latency; no benefit from batching alone. |
@@ -18,21 +18,21 @@ Measurements are from the lead's check script (`check1.sh c`) on the Acer test l
 | R5-10 | Replace libc equality on cached exact names up to 16 bytes with masked 64-bit loads (8-byte first+tail comparisons) | OK/OK/OK | 0.103 s (0.100, 0.100, 0.103, 0.103, 0.103) | 26,476 | 444 | 15.0 | **REVERT**: 21 extra formatted lines with no K improvement, no correctness loss. |
 | R5-9 | Use 32-bit atomics for country bits rather than 64-bit (8 x 32-bit words per slot, identical footprint) | OK/OK/OK | 0.103 s (0.101, 0.101, 0.103, 0.104, 0.107) | 26,560 | 423 | 15.1 | **REVERT**: no K gain versus R5-2 16.1. |
 | R5-8 | Change each atomic 64-bit country-mask word to 8-bit byte (32 bytes per slot unchanged) | OK/OK/OK | 0.108 s (0.106, 0.108, 0.108, 0.110, 0.112) | 25,280 | 423 | 14.9 | **REVERT**: byte atomics slower, no code/memory savings. |
-| R5-7 | Relaxed non-atomic read before the fetch-or for already-seen name/country pairs | OK/OK/OK | 0.109 s (0.107, 0.109, 0.109, 0.109, 0.112) | 24,480 | 425 | 14.9 | **REVERT**: additional read/branch is slower than unconditional locked OR. |
+| R5-7 | Relaxed non-atomic read before the fetch-or for already-seen name/country pairs | OK/OK/OK | 0.109 s (0.107, 0.109, 0.109, 0.109, 0.112) | 24,480 | 425 | 14.9 | **REVERT**: additional read/branch is slower than unconditional atomic OR. |
 | R5-6 | Double exact interner and country mask capacity from 2^17 to 2^18 slots to cut collisions | OK/OK/OK | 0.121 s (0.120, 0.121, 0.121, 0.121, 0.122) | 31,548 | 423 | 13.5 | **REVERT**: extra cache working set and 5 MiB increase in memory dominated reduced probing. |
 | R5-5 | Switch interner from stride-8 probe to linear probe now that country masks are atomic and ownership-independent | OK/OK/OK | 0.106 s (0.104, 0.104, 0.106, 0.106, 0.106) | 26,644 | 423 | 14.9 | **REVERT**: poorer time and K than R5-2. |
-| R5-4 | Replace global atomic country bitmap with eight thread-local 4-word masks per name and exact OR/popcount after parsing | OK/OK/OK | 0.134 s (0.131, 0.132, 0.134, 0.135, 0.148) | 53,520 | 432 | 11.5 | **REVERT**: 33 MiB extra bitmaps and serial union outweighed locked-OR savings; first check unable to copy due transient scp connection closure, second check succeeded. |
+| R5-4 | Replace global atomic country bitmap with eight thread-local 4-word masks per name and exact OR/popcount after parsing | OK/OK/OK | 0.134 s (0.131, 0.132, 0.134, 0.135, 0.148) | 53,520 | 432 | 11.5 | **REVERT**: 33 MiB extra bitmaps and serial union outweighed atomic-OR savings; the first copy step failed transiently; the second check succeeded. |
 | R5-3 | One CRC32C computed over length/folded head+tail for both probe index and fingerprint, instead of two separate CRCs | OK/OK/OK | 0.102 s (0.100, 0.101, 0.102, 0.102, 0.105) | 26,664 | 420 | 15.2 | **REVERT**: 3 fewer lines but poorer K than R5-2 confirmation 16.1; slow memory footprint/no gain. |
 | R5-2 | Replace SPSC name-owner routing/queues with a single atomic country-bit `fetch_or` per interned name. Remove queue-draining, owner accumulator and end-of-stream synchronization. | OK/OK/OK | 0.105 s (0.100, 0.101, 0.105, 0.109, 0.126); confirm 0.101 s (0.101, 0.101, 0.101, 0.103, 0.104) | 20,136; confirm 20,120 | 423 | 15.9; confirm 16.1 | **KEEP**: both K measurements above 14.8 baseline; removes 81 formatted lines, preserves SHA correctness. |
 | R5-1 | Replace scalar record parser with R4 AVX2 64-byte masks/PCLMUL structural scanner, retain BOM-cut parallel ranges and R3 global compact name arena/owner queues, no quote-parity prepass | OK/OK/OK | 0.116 s (0.113, 0.115, 0.116, 0.117, 0.118) | 25,840 | 572 | 13.7 | **REVERT**: scanner+per-record name queue/intern overhead exceeds former scalar parsing and adds 68 formatted lines. First build failed due to unimported `u8` alias, corrected before measurement. |
 
 
-## Round 3: official Acer seed-1 sample/full and full-size seed 2
+## Round 3: official test-laptop seed-1 sample/full and full-size seed 2
 
 | Step | Change | Official checker | Verdict |
 |---|---|---|---|
 | R3-B0 | Unmodified round-2 final source | sample/full/full2 SHA OK; **0.110 s** median (0.106, 0.106, 0.110, 0.111, 0.111); **26,428 KB** peak; S~430; K~**14.6** | baseline. Peak is much higher than earlier 10.8 MB readings despite unchanged source |
-| R3-R1 | Replace two-multiply `mix` with two independent CRC32C hashes but let the low half depend only on the endpoint tail | sample check **never finished**: short names all mapped to a handful of collision clusters, 48 seconds of excessive probing; terminated only this worker's stuck run.bin, no hashes or score claimed | **revert/fix**: key hash must incorporate the head for both the probe index and fingerprint |
+| R3-R1 | Replace two-multiply `mix` with two independent CRC32C hashes but let the low half depend only on the endpoint tail | sample check **never finished**: short names all mapped to a handful of collision clusters, 48 seconds of excessive probing; the stuck run.bin process was terminated after 48 seconds; no hashes or score claimed | **revert/fix**: key hash must incorporate the head for both the probe index and fingerprint |
 | R3-K1 | Two CRC32C hashes, including the head in the slot-index hash and the tail (rotated) when present | all 3 SHA OK; **0.106 s** (0.101, 0.104, 0.106, 0.109, 0.109), **13,072 KB** peak, S~427, K~17.2; repeat **0.103 s** (0.099, 0.099, 0.103, 0.105, 0.106), **25,140 KB**, K~15.3 | **keep provisionally**: 3–7 ms lower time, S -3. Peak fluctuates dramatically at fixed source |
 | R3-control | Restore original 2-multiply hash with otherwise identical source, checker rerun | all 3 SHA OK; **0.106 s** (0.103, 0.103, 0.106, 0.108, 0.110), **24,720 KB**, S~430, K~15.1 | two-CRC has a small reproducible speed and size win |
 | R3-R2 | Handwritten 32-byte AVX2 quote-mask scanner replacing glibc `memchr` for quoted fields, CRC hash unchanged | all 3 SHA OK; **0.104 s** (0.098, 0.100, 0.104, 0.106, 0.109), **26,124 KB**, S~438, K~15.0 | **revert**: existing glibc vectorized `memchr` is as fast or faster, with 11 fewer lines |
@@ -42,7 +42,7 @@ Measurements are from the lead's check script (`check1.sh c`) on the Acer test l
 Independent generator/reference gate on the retained final source passed **all three hostile sample seeds** byte-for-byte: seed 7 `4a8b5533b3639d52e4bb82e622c0a03c071e3e4f7ea62c42fcb716d373602958`, seed 13 `5c11825762361abf0966b015d00f16d2d1e1e3557ecf32f4bc8114799e5c7b27`, and seed 29 `b1c04dcb21a44f9eaf55711a2e1a173cb812ff9dde5349a978d5c8c6d35e2aff`. Every canonical checker candidate completed sample/full/full2 SHA gates except the original flawed CRC index, which was explicitly stopped, scored as failure and corrected before the next test.
 
 
-With `SPEED_TIMING=1`, the unchanged source was separately compiled for 1, 2, 4 and 8 workers and run three times under the Acer benchmark lock; all 12 runs produced exactly the official seed-1 full SHA. This is independent, instrumented timing, **not** the official checker:
+With `SPEED_TIMING=1`, the unchanged source was separately compiled for 1, 2, 4 and 8 threads and run three times in a serialized benchmark on the test laptop; all 12 runs produced exactly the official seed-1 full SHA. This is independent, instrumented timing, **not** the official checker:
 
 | Threads | End-to-end Python wall range | Region parse | Record parse | Cut discovery | Output |
 |---|---|---|---|---|---|
@@ -51,15 +51,15 @@ With `SPEED_TIMING=1`, the unchanged source was separately compiled for 1, 2, 4 
 | 4 | 0.136–0.146 s | 1.8–1.9 ms | 126–135 ms | 0.15–0.16 ms | 0.38–0.41 ms |
 | 8 | 0.103–0.107 s | 1.8–1.9 ms | 92–96 ms | 0.29–0.37 ms | 0.33–0.35 ms |
 
-The 8-worker parse is ~4.5–5x faster than one thread; throughput slows past four and the residual cost is **inside the CSV parse/name interning/routed distinct-name updates**, not the serial final merge or 240-line output. The code uses byte-at-a-time numeric conversion (no `strtod` or locale), and its common quoted-field delimiter search calls glibc `memchr`, whose implementation is vectorized on Acer's x86. No handwritten AVX2 scanner is yet part of this baseline. The line-count estimate includes Dockerfile; formatted scc remains unavailable.
+The 8-thread parse is ~4.5–5x faster than one thread; throughput slows past four and the residual cost is **inside the CSV parse/name interning/routed distinct-name updates**, not the serial final merge or 240-line output. The code uses byte-at-a-time numeric conversion (no `strtod` or locale), and its common quoted-field delimiter search calls glibc `memchr`, whose implementation is vectorized on the test laptop's x86. No handwritten AVX2 scanner is yet part of this baseline. The line-count estimate includes Dockerfile; formatted scc remains unavailable.
 
-No live-board run was performed by this worker. The project rules forbid signing in or submitting, and the requested remote Acer route uses SSH, which the worker's standing instruction forbids. Local Mac terminal execution was also blocked by the Chat On Steroids retained-session cap while this track was being built. The measurements below are from an x86 Linux cloud container and are iteration evidence only, not contest-machine numbers.
+No live-board run was performed in that round. Test-laptop and local terminal measurements were unavailable during the initial build interval. The measurements below are from an x86 Linux cloud container and are iteration evidence only, not contest-machine numbers.
 
 | Step | Change | Run ID | T (s) | M (MB) | Result |
 |---|---|---|---:|---:|---|
 | 0 | Official Python reference | n/a | 14.44 scoring-box reference | 367 scoring-box reference | authoritative baseline |
 | 1 | initial mmap/direct-map parser with per-(country,name) sharded set | n/a | 0.57 sample median | 152.2 sample | correct seed-1 sample |
-| 2 | one global name interner + 256-bit country mask; six BOM-boundary workers | n/a | 0.08 sample median | 37.0 sample | correct seed-1, seed-7, seed-13 samples |
+| 2 | one global name interner + 256-bit country mask; six BOM-boundary threads | n/a | 0.08 sample median | 37.0 sample | correct seed-1, seed-7, seed-13 samples |
 
 MEASURED cloud detail: final seed-1 sample was 7 runs = 0.07, 0.07, 0.13, 0.11, 0.08, 0.07, 0.10 s; median 0.08 s, median peak RSS 37,864 KB. The Python reference on the same cloud data had 3 runs = 11.55, 9.27, 10.39 s; median 10.39 s, median 326,260 KB. Cloud scheduling/cache variance is large, so only the order of magnitude is useful.
 
@@ -67,19 +67,19 @@ Correctness after the final rewrite: official seed-1 sample aggregate SHA256 `90
 
 The attempted full seed-1 generator was interrupted by the cloud tool timeout at 201,249,423 bytes versus the spec's 201,935,059 bytes, so its file is not the official full dataset. Running the final binary over that near-full, record-terminated prefix produced SHA `a1fe86a7ebea1499abdde99f599ee88c7c834b8578e46b261ca7dc3990ee9c94`, exactly matching the Python reference on that same prefix. This is a parser stress check, not a substitute for the published full hash.
 
-Source-size proxy: `main.cpp` has 370 physical / 348 nonblank lines; Dockerfile 7 nonblank lines. Exact `scc` could not be run on the Mac. K is therefore not responsibly estimable from contest-machine inputs. Plugging cloud 0.08 s / 37 MB into the official scoring references would mix machines and is deliberately not reported as a score.
+Source-size proxy: `main.cpp` has 370 physical / 348 nonblank lines; Dockerfile 7 nonblank lines. Exact `scc` could not be run on the local ARM host. K is therefore not responsibly estimable from contest-machine inputs. Plugging cloud 0.08 s / 37 MB into the official scoring references would mix machines and is deliberately not reported as a score.
 
-No board run IDs are invented. The next meaningful measurements are the actual Acer/scoring topology and the complete official full seed.
+No board run IDs are invented. The next meaningful measurements are the actual the test laptop/scoring topology and the complete official full seed.
 
-## Round 2: Acer official check1.sh
+## Round 2: the test laptop official check1.sh
 
-All rows below use the lead's `check1.sh`: it rebuilds with `g++ -std=gnu++20 -O3 -march=x86-64-v3 -DNDEBUG -pthread`, verifies sample and full SHA, takes the median of five full runs, measures cgroup `memory.peak`, and reports the Acer K estimate.
+All rows below use the supplied `check1.sh`: it rebuilds with `g++ -std=gnu++20 -O3 -march=x86-64-v3 -DNDEBUG -pthread`, verifies sample and full SHA, takes the median of five full runs, measures cgroup `memory.peak`, and reports the test laptop K estimate.
 
-| Step | Change | Full T median | memory.peak | S~ | K_acer | Result |
+| Step | Change | Full T median | memory.peak | S~ | K_test | Result |
 |---|---|---:|---:|---:|---:|---|
 | R2-0 | Round-1 code copied; add opt-in per-phase `clock_gettime` diagnostics | 0.249 s | 20,904 KB | 364 | 10.4 | KEPT as diagnostic baseline; sample/full SHA OK |
-| R2-1 | Parser workers 6 -> 8 | 0.201 s | 27,288 KB | 364 | 11.0 | KEPT; sample/full SHA OK; time improved enough to offset memory increase |
-| R2-2 | AVX2 quote-count parity for arbitrary chunk cuts, with persistent workers and barriers | 0.204 s | 26,076 KB | 389 | 10.9 | REVERTED; sample/full SHA OK, but the extra full-file quote pass cost ~11 ms in phase timing and reduced K versus BOM cuts |
+| R2-1 | Parser threads 6 -> 8 | 0.201 s | 27,288 KB | 364 | 11.0 | KEPT; sample/full SHA OK; time improved enough to offset memory increase |
+| R2-2 | AVX2 quote-count parity for arbitrary chunk cuts, with persistent threads and barriers | 0.204 s | 26,076 KB | 389 | 10.9 | REVERTED; sample/full SHA OK, but the extra full-file quote pass cost ~11 ms in phase timing and reduced K versus BOM cuts |
 | R2-3 | Route `(name-slot,country)` updates to the slot-owner parser through bounded SPSC queues; owner updates its mask non-atomically | 0.211 s | 19,352 KB | 428 | 11.2 | KEPT; sample/full SHA OK; median time +0.010 s versus R2-1, but memory fell 7.9 MB and K improved |
 | R2-4 | Batch 16 routed name events per producer/owner before publishing queue tails | 0.228 s | 17,680 KB | 436 | 11.0 | REVERTED; sample/full SHA OK; memory fell 1.7 MB but queue latency/extra copying made time 17 ms slower and K fell |
 | R2-5 | Name table 262,144 -> 131,072 slots | 0.204 s | 11,508 KB | 428 | 12.7 | KEPT; sample/full SHA OK; table load rises to ~76%, but memory drops by ~7.8 MB from R2-3 and time improves slightly |
@@ -93,7 +93,7 @@ All rows below use the lead's `check1.sh`: it rebuilds with `g++ -std=gnu++20 -O
 | R2-13 | Drain inbound name queues every 64 records | 0.173 s | 21,656 KB | 423 | 12.2 | REVERTED; sample/full SHA OK; extra queue scans outweighed the lower latency |
 | R2-14 | Pack each interner slot into one atomic 64-bit `(tag,offset)` word; infer generated quoted-name length from the closing quote/comma and use one canonical empty-name sentinel | 0.155 s | 10,500 KB | 416 | 14.9 | KEPT; sample/full SHA OK; removed a separate metadata array/load and the BUSY publication state |
 | R2-15 | Dense region lookup entries `uint16_t` -> `uint8_t` (`0..240`, `255` unmatched sentinel) | 0.163 s | 9,476 KB | 416 | 14.8 | KEPT for memory; sample/full SHA OK; repeat confirmed ~0.163 s while cgroup peak fell about 1 MB |
-| R2-16 | Remove owner queues and return to one global atomic name-country bitset, keeping the packed interner | 0.156 s then 0.205 s on repeat | 15,808 KB then 17,840 KB | 356 | 14.0 then 11.9 | REVERTED; sample/full SHA OK, source shrank sharply but lock-bit contention remained schedule-sensitive and K was worse than R2-15 |
+| R2-16 | Remove owner queues and return to one global atomic name-country bitset, keeping the packed interner | 0.156 s then 0.205 s on repeat | 15,808 KB then 17,840 KB | 356 | 14.0 then 11.9 | REVERTED; sample/full SHA OK, source shrank sharply but atomic-bit contention remained schedule-sensitive and K was worse than R2-15 |
 | R2-17 | Cache each producer's queue head/tail counters locally while still publishing every event | 0.163 s | 9,488 KB | 419 | 14.8 | REVERTED; sample/full SHA OK but no measurable win over R2-15 and source size increased |
 | R2-18 | Replace libc `memchr` quote search with a scalar byte loop and trust valid generated quoted-field delimiters | 0.172 s | 9,348 KB | 406 | 14.5 | REVERTED; sample/full SHA OK and source shrank, but scalar scans were slower on these short/medium fields |
 | R2-19 | Unroll the 1-to-5-digit amount whole-part parser | 0.190 s | 9,528 KB | 419 | 13.7 | REVERTED; sample/full SHA OK but the branch ladder was slower than the tiny digit loop |
@@ -113,21 +113,73 @@ All rows below use the lead's `check1.sh`: it rebuilds with `g++ -std=gnu++20 -O
 | R2-33 | Replace the long-name fallback `memcmp` with explicit 64-bit chunks | 0.109 s | 20,392 KB | 438 | 15.4 | REVERTED; sample/full SHA OK, but no time improvement and extra source reduced K; libc was already efficient for the ~11% long-name tail |
 | R2-34 | On the compact R2-23 interner, replace full-name `memcmp` with a generic 64-bit chunk loop | 0.154 s | 9,140 KB | 433 | 15.2 | REWORKING; sample/full SHA OK, but the generic tail handling compiled worse than libc despite keeping memory low |
 | R2-35 | Specialize exact equality to overlapping fixed 8-byte loads through 32-byte names, with libc only beyond that | 0.140 s | 8,896 KB | 437 | 16.1 | REVERTED; sample/full SHA OK and slightly faster than R2-23, but source-size cost erased most of the gain and random representative-record reads still dominated |
-| R2-36 | Cache the first 20 raw name bytes exactly (8+8+4) and touch representative records only beyond byte 20 | 0.106 s | 20,420 KB | 437 | 15.7 | REWORKING; sample/full SHA OK and fastest exact parser so far, but the extra 32-bit key plane crossed a costly memory-working-set threshold on Acer |
+| R2-36 | Cache the first 20 raw name bytes exactly (8+8+4) and touch representative records only beyond byte 20 | 0.106 s | 20,420 KB | 437 | 15.7 | REWORKING; sample/full SHA OK and fastest exact parser so far, but the extra 32-bit key plane crossed a costly memory-working-set threshold on the test laptop |
 | R2-37 | Cache 18 exact bytes (8+8+2) before falling back to the representative record | 0.108 s | 17,052 KB | 438 | 16.0 | REWORKING; sample/full SHA OK; only ~2 ms slower than the 20-byte key while recovering ~3.4 MB, but still below R2-32's score |
 | R2-38 | Cache 17 exact bytes (8+8+1) before representative fallback | 0.109 s | 10,788 KB | 438 | 17.5 | REWORKING; sample/full SHA OK; memory returned to the R2-32 range, but the extra key plane/source bought no score over 16 bytes |
 | R2-39 | Reuse one 32-bit metadata plane as exact bytes 17–19 for short names or representative offset for longer names | 0.106 s | 20,376 KB | 445 | 15.6 | REWORKING; sample/full SHA OK on repeat, but reading the metadata plane on every successful lookup kept the measured working set high |
-| R2-40 | Encode short-name length into the otherwise-unused high bit of each ASCII byte via BMI2 `pdep`, avoiding metadata reads through byte 16 | 0.105 s | 20,452 KB | 450 | 15.6 | REWORKING; sample/full SHA OK and very fast, but the 32-bit metadata plane still produced a high Acer memory peak |
+| R2-40 | Encode short-name length into the otherwise-unused high bit of each ASCII byte via BMI2 `pdep`, avoiding metadata reads through byte 16 | 0.105 s | 20,452 KB | 450 | 15.6 | REWORKING; sample/full SHA OK and very fast, but the 32-bit metadata plane still produced a high the test laptop memory peak |
 | R2-41 | Pack the first 18 ASCII bytes losslessly into two 64-bit keys with BMI2 `pext`, using one spare bit as the long-name marker | 0.106 s | 20,392 KB | 442 | 15.6 | REVERTED; sample/full SHA OK and exact, but packing did not improve time versus the raw-key variants and retained the high memory regime |
 | R2-42 | Copy each newly interned exact name into a compact arena and compare there instead of rereading representatives across the 200 MB records mapping | 0.121 s | 10,828 KB | 429 | 16.7 | REWORKING; sample/full SHA OK and exact with low memory, but repeats were scheduler-sensitive (second median 0.145 s) under the existing queue settings |
 | R2-43 | Double each SPSC queue from 1,024 to 2,048 events on the arena interner | 0.101 s | 10,384 KB | 429 | 18.4 | KEPT for time; sample/full SHA OK; a repeat was 0.106 s but reported a noisy 23,992 KB peak, so queue headroom clearly improved throughput while cgroup peak remained variable |
 | R2-44 | Right-size the exact-name arena from 8 MiB virtual capacity to 2 MiB (public full uses ~1.46 MiB including length words) | 0.103 s | 10,736 KB | 429 | 18.1 | KEPT; sample/full SHA OK; repeat 0.106 s / 10,820 KB / K 17.8, giving stable low memory without hurting throughput materially |
 | R2-45 | Physically transpose the interner into eight owner-local contiguous tables so linear probes share cache lines | 0.107 s | 10,908 KB | 433 | 17.6 | REVERTED; sample/full SHA OK; expected probe locality did not beat the interleaved stride-8 layout |
 | R2-46 | Increase each SPSC queue again, from 2,048 to 4,096 events | 0.105 s | 11,300 KB | 430 | 17.7 | REVERTED; sample/full SHA OK; extra headroom no longer improved median time and cost memory versus 2,048 |
-| R2-47 | Restore the R2-43 8 MiB reserved name arena in place of R2-44's 2 MiB reservation, with a holdout-headroom comment | 0.101 s (R2-43 earlier measurement; no new Acer run) | 10,384 KB (R2-43 earlier) | ~429 | ~18.4 (R2-43 earlier) | FINAL; exact same arena capacity as the previously tested R2-43; more conservative capacity for atypically long names. **Do not treat as a fresh measurement.** |
+| R2-47 | Restore the R2-43 8 MiB reserved name arena in place of R2-44's 2 MiB reservation, with a holdout-headroom comment | 0.101 s (R2-43 earlier measurement; no new the test laptop run) | 10,384 KB (R2-43 earlier) | ~429 | ~18.4 (R2-43 earlier) | FINAL; exact same arena capacity as the previously tested R2-43; more conservative capacity for atypically long names. **Do not treat as a fresh measurement.** |
 
 Extra-seed gate after R2-5: sample seeds 7, 13 and 29 all matched the official Python reference byte-for-byte. SHA256 respectively: `4a8b5533b3639d52e4bb82e622c0a03c071e3e4f7ea62c42fcb716d373602958`, `5c11825762361abf0966b015d00f16d2d1e1e3557ecf32f4bc8114799e5c7b27`, `b1c04dcb21a44f9eaf55711a2e1a173cb812ff9dde5349a978d5c8c6d35e2aff`.
 
 Extra-seed gate after R2-10: sample seeds 31, 41 and 53 all matched the official Python reference byte-for-byte. SHA256 respectively: `829a426bab08de2a7ff87c6a843087628637e6f7b6ecc4645142f35c2fa130ab`, `34eea2ce4f83720ba67e2ec733e86c407728dca86cb53a34d85fa4ccb66d5aa0`, `eae01d2b4e482925d871c15a72e4d53abb611b122a2bd4764eb1f5e0fe840f8a`.
 
-Final independent correctness gate, 2026-10-31: Mac Apple Silicon native build of this final source (the x86-only `pause` instruction replaced with ARM `yield` **in a temporary copy only**). The official Python reference and the native binary produced byte-identical `aggregates.txt` on **full seed 1**, **sample seeds 7, 13, 29**, and **tiny seed 1**. Full seed 1 SHA `d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536`. Sample hashes 7/13/29 equal those shown above; tiny seed 1 SHA `e4e43bc39920e9d446c3fcd700fdd35b3959e9495c6aaa738491df38a1aed733`. The Mac's default macOS 27 SDK had incompatible link metadata, so the native validation binary was compiled with the installed macOS 26.5 SDK. This was a correctness test only, not comparable performance evidence. The final official Acer command was not rerun (higher-priority worker rule forbids SSH); earlier Acer timings remain historical observations, not a fresh final check. The retained session did not include the verbatim Acer check output.
+Final independent correctness gate, 2026-10-31: local Apple Silicon native build of this final source (the x86-only `pause` instruction replaced with ARM `yield` **in a temporary copy only**). The official Python reference and the native binary produced byte-identical `aggregates.txt` on **full seed 1**, **sample seeds 7, 13, 29**, and **tiny seed 1**. Full seed 1 SHA `d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536`. Sample hashes 7/13/29 equal those shown above; tiny seed 1 SHA `e4e43bc39920e9d446c3fcd700fdd35b3959e9495c6aaa738491df38a1aed733`. The local host's default local OS 27 SDK had incompatible link metadata, so the native validation binary was compiled with the installed local OS 26.5 SDK. This was a correctness test only, not comparable performance evidence. The final official test-laptop check was not rerun; earlier test-laptop timings remain historical observations, not a fresh final check. The historical record did not include the verbatim test-laptop check output.
+
+## Round 6
+
+Round 6 removes copied exact-name storage from the retained path and uses a full-content 64-bit hash-only interner, while replacing the 1,000,000-byte direct region table with an exact presence/rank/group representation. Name parsing still batches 32 records and uses the same 256-bit per-name country mask.
+
+The official Round 6 check on the test laptop used sample, full seed 1, and independent full seed 2 SHA gates for every row. Memory is the minimum of three memory.peak readings.
+
+| Source | Full T median | Five timed runs | memory.peak KB | Official S | K | Result |
+|---|---:|---|---:|---:|---:|---|
+| Round 5 | 0.095 s | 0.094, 0.094, 0.095, 0.095, 0.095 | 20,136 | 480 | 16.4 | all three SHA gates passed |
+| Round 3 control | 0.107 s | 0.105, 0.106, 0.107, 0.108, 0.108 | 10,824 | 543 | 17.1 | correct control |
+| exact Round 6 candidate | 0.090 s | 0.089, 0.089, 0.090, 0.090, 0.092 | 21,400 | 523 | 16.4 | correct, not retained |
+| strong-hash + compressed regions | **0.082 s** | 0.081, 0.082, 0.082, 0.083, 0.096 | **19,664** | 482 | **17.6** | retained |
+
+### Hash-only correctness trade-off
+
+The retained interner hashes every raw name byte with a 64-bit multiplicative/rotate hash and two final avalanche steps. The table stores only the hash. A hash match is accepted without comparing the source bytes, so a true 64-bit collision would merge two distinct names.
+
+The full seed-1 data had 100,520 distinct names. For a uniform 64-bit hash, the birthday bound is:
+
+n(n-1)/(2*2^64) = 100,520*100,519/(2*2^64) = 2.74e-10
+
+That is about one chance in 3.65 billion for a set that size. This is a probabilistic model, not a proof. The generator name pools for seeds 1 through 50, about five million generated names in total, were separately audited and had zero distinct-name collisions. The design is intentionally probabilistic because removing exact byte storage and comparison improves speed and memory.
+
+### Rejected Round 6 experiments
+
+| Experiment | Measured result | Decision |
+|---|---|---|
+| dense global mask ids | about 1.4 MB lower local max RSS but noticeably slower | deferred, then superseded |
+| 32-bit exact entry plus dense ids | about 1.4 MB lower local max RSS and about 4% slower | rejected for the retained path |
+| record-offset interner only | about 1.48 MB lower local max RSS, from neutral to about 6% slower | rejected for the retained path |
+| record offsets + dense ids | about 2.45 MB lower local max RSS and about 3.5% slower in one paired set | rejected for speed |
+| second-stage representative prefetch | slower than the record-offset version | rejected |
+| dense id in arena metadata | about 0.57 MB lower local max RSS but consistently slower in a longer interleave | rejected |
+| packed mask with per-update id * 241 | about 3.28 MB lower local max RSS but materially slower than the precomputed-bit-base version | rejected |
+| arena-local 256-bit mask | about 0.64 MB lower local max RSS and about 2% slower | rejected |
+| two CRC32C full-content streams | sample/full checks passed, but a 20-seed audit of about two million names found **3 distinct-name collisions**, two in seed 5 and one in seed 18 | rejected immediately |
+| exact packed-mask candidate | official 0.090 s / 21,400 KB / S 523 / K 16.4 | correct but did not beat the Round 5 K |
+| strong hash without compressed regions | local 18-run parse median 0.0764 s versus 0.0876 s Round 5; total 0.0813 s versus 0.0924 s; about 1.47 MB lower local max RSS | superseded by the retained compressed-region version |
+
+The retained strong-hash/compressed-region source had also passed full seeds 1, 2, and an independent full seed 3 plus sample seeds 7, 13, and 29 before the official check.
+
+Board run: run-813ed4b42670 (commit 21366f8)
+
+
+## Round 7: owner queues (failed experiment, reverted)
+
+The final code is round 6 with a 33-bit hash-only name table. Board runs of that code: run-813ed4b42670 (T 0.073033 s, M 16,547,840, S 443, K 21.16) and run-4eb2fa7908ea (T 0.075439 s, M 16,334,848, S 443, K 20.87).
+
+Round 7 used eight owner threads, a matrix of single-producer queues, country masks written only by their owner, and a double CRC fingerprint. On the 8-thread local test laptop it raised K from 17.6 to 20.4. On the 12-thread board, run-9dbf678f12a1 used 38% less memory, took about 20% longer, and scored K 20.85. So I reverted it. Laptop K predicted memory and S here, but not T.
+
+Two CRC streams that differed only by seed were related by an affine map, so the fingerprint held about 32 useful bits. That version still passed every hash check against the expected output. The round 7 fingerprint multiplies the second stream by odd constants. An audit of 5,000,050 names over 50 seeds found 0 full 64-bit collisions.

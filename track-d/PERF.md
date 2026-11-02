@@ -1,40 +1,40 @@
 # Track D performance and optimisation record
 
-**Environment:** Acer x86-64 Intel i5-1035G1, eight hardware threads,
+**Environment:** the test laptop x86-64 Intel i5-1035G1, eight hardware threads,
 Debian GCC 14.2, `-O3 -march=x86-64-v3 -pthread -DNDEBUG`,
 static libstdc++/libgcc. Each number below is **MEASURED** as the median of
-five independent full-process runs, with exclusive `flock` on
-`~/speeddemon/bench.lock`. Time uses `time.perf_counter()` around
+five independent full-process runs under exclusive serialized benchmark scheduling.
+Time uses `time.perf_counter()` around
 `fork/exec/wait4`; memory is child `wait4().ru_maxrss` in Linux KB.
-The reference full-size Acer time/memory of **74.65 s / 872,796 KB** was
-measured by the existing preparation job and saved in `ref-times.txt`
-(not rerun by this worker). The sample reference was 4.98 s / 92,160 KB.
+The reference full-size test-laptop time/memory of **74.65 s / 872,796 KB** was
+measured by the existing reference run and saved in `ref-times.txt`
+(not rerun in that round). The sample reference was 4.98 s / 92,160 KB.
 
 All listed versions were checked against the official full-size seed-1
 reference SHA-256 before their timings were accepted. Bench JSON, including
-all five individual runs, is preserved in the worker's `measurements/`
+all five individual runs, is preserved in the thread's `measurements/`
 folder, outside this submission directory.
 
 | Change / variant | Full median seconds | Median peak KB | Result |
 |---|---:|---:|---|
-| Serial parser, dual CSR, binary heap, 12 search workers | 1.279327 | 421,612 | Correct baseline |
-| Same, 4 search workers | 1.404965 | 255,184 | Slower |
-| Same, 6 search workers | 1.309867 | 257,436 | Less memory |
-| Same, 8 search workers | 1.244235 | 312,012 | Faster and leaner than 12 |
-| Same, 10 search workers | 1.276585 | 366,960 | Slower |
-| Same, 8 workers with a 4-way heap | 1.249242 | 311,976 | Marginally slower |
-| Split input into 4 parallel parse chunks, 8 workers | 1.172385 | 311,992 | Faster |
-| Split into 8 parse chunks, 8 workers | 1.151917 | 311,956 | Faster |
-| Split into 12 parse chunks, 8 workers | 1.149146 | 312,008 | Faster |
+| Serial parser, dual CSR, binary heap, 12 search threads | 1.279327 | 421,612 | Correct baseline |
+| Same, 4 search threads | 1.404965 | 255,184 | Slower |
+| Same, 6 search threads | 1.309867 | 257,436 | Less memory |
+| Same, 8 search threads | 1.244235 | 312,012 | Faster and leaner than 12 |
+| Same, 10 search threads | 1.276585 | 366,960 | Slower |
+| Same, 8 threads with a 4-way heap | 1.249242 | 311,976 | Marginally slower |
+| Split input into 4 parallel parse chunks, 8 threads | 1.172385 | 311,992 | Faster |
+| Split into 8 parse chunks, 8 threads | 1.151917 | 311,956 | Faster |
+| Split into 12 parse chunks, 8 threads | 1.149146 | 312,008 | Faster |
 | Same 12 chunks with `-flto` | 1.149414 | 312,024 | No material benefit |
-| **Final: 12 chunks, 8 workers, binary heap** | **1.144664** | **312,128** | **Correct** |
+| **Final: 12 chunks, 8 threads, binary heap** | **1.144664** | **312,128** | **Correct** |
 
-On the Apple M1 Pro (not comparable to the Acer hardware), a 4-way heap
+On the Apple M1 Pro (not comparable to the test laptop hardware), a 4-way heap
 measured 0.4002 s, a binary heap 0.3939 s, an 8-way heap 0.4105 s,
 and a radix heap 0.4584 s, each median of five runs. All four versions
 produced the correct full hash. The radix heap was discarded.
 
-**Final correctness (Acer, five successful runs each):**
+**Final correctness (the test laptop, five successful runs each):**
 
 | Dataset | Median seconds | Median peak KB | Expected = actual SHA-256 |
 |---|---:|---:|---|
@@ -44,28 +44,28 @@ produced the correct full hash. The radix heap was discarded.
 | Seed 8 sample | 0.105778 | 32,956 | `b75df2f1321b10f3b6da1f786615a262dcebb6f3132fb285514b3c95dc7f6805` |
 
 All four expected hashes came from the reference, including direct comparison
-with Acer's existing reference output for seed 1 and new Python reference
-runs for seeds 7 and 8. Independent Mac checks on 100 small random graphs
+with the test laptop's existing reference output for seed 1 and new Python reference
+runs for seeds 7 and 8. Independent local ARM host checks on 100 small random graphs
 (some above 2,047 queries, exercising epoch rollover) also matched.
 
-The final solution is **65.2x faster** than the measured full Acer Python
+The final solution is **65.2x faster** than the measured full the test laptop Python
 reference, with **2.80x less peak resident memory**. Before contest formatting,
 a local nonblank/noncomment line count for C++ source, Dockerfile and TOML is
 **256** (245 + 7 + 4); this is an **estimate**, not an official
 `clang-format`+`scc` count. With that provisional S and `D=1`,
 `K = (74.65/1.144664)^0.5 (872796/312128)^0.2 (43/256)^0.15`
-is approximately **7.59** on Acer-derived ratios. The actual K is unknown
+is approximately **7.59** on the test laptop-derived ratios. The actual K is unknown
 until the scoring-box CPU, formatter, and cgroup memory measurement run.
 The 0.27 s board record was made on another CPU and is not a comparable
 benchmark.
 
 **Open items:** Docker offline build and actual official scoring-box run have
-not been completed; only the lead can submit/install the board app. The
+not been completed; board submission and installation were outside this measurement run. The
 official `scc` and LLVM formatting tools were not installed locally.
 
-## Round 2, official Acer check1.sh measurements
+## Round 2, official test-laptop check1.sh measurements
 
-Round 2 uses the lead's Oct 31 `check1.sh`, which rebuilds the submitted
+Round 2 uses the supplied Oct 31 `check1.sh`, which rebuilds the submitted
 folder, verifies seed-1 sample and full SHA-256, takes five full timings, and
 reads cgroup `memory.peak`. Only rows below produced by that check are used for
 round-2 keep/revert decisions.
@@ -84,7 +84,7 @@ round-2 keep/revert decisions.
 | **Use randomized node id directly as sparse-table hash index** | **1.262** | **165,108** | **281** | SHA OK; **kept**. Runtime is effectively flat within run noise, peak dropped 92 KB, and the multiply/shift vanished. |
 
 After these three kept changes, fresh sample seeds 9 and 10 were generated on
-Acer and compared to new Python-reference outputs. Both matched exactly:
+the test laptop and compared to new Python-reference outputs. Both matched exactly:
 `c5c972553116d7174716c1b7fc39f8804f7fd022cf6dd8a40763e1005c6fd4a0`
 (seed 9) and `a6c0bbe658da821e540e9c7e4dc7582d1f9fe1d8d00c8f5da8bab8c5ecdbe172`
 (seed 10).
@@ -93,8 +93,8 @@ Acer and compared to new Python-reference outputs. Both matched exactly:
 | Packed 12-byte AoS entries for sparse distance table | 1.363 | 165,252 | 281 | SHA OK; **reverted**. Co-locating tag/value hurt lookup speed versus split tag/value arrays. |
 | Update bidirectional best only when a node is popped, not on relax | 1.293 | 166,084 | 279 | SHA OK; **reverted**. Fewer opposite-table probes were outweighed by later meeting detection and extra search. |
 | Choose the smaller frontier key except for no-in-degree sources | >65 s on sample check; killed | n/a | 282 | **reverted** before full timing. A large-weight special case outside the no-in-source pattern still drove a near-full reverse scan; the alternating policy is necessary for this generator. |
-| Sparse-search thread sweep: 6 / 8 / 10 / 12 / 14 workers | 1.339 / 1.354 / 1.297 / 1.337 / 1.292 | 165,920 / 165,976 / 166,204 / 166,476 / 166,024 | 281 | SHA OK on every official check. 10 retested at 1.279. **Default remains 8**: its earlier kept check was 1.262 / 165,108 and extra workers did not reproducibly beat that while slightly raising memory. |
-| Node-range parallel CSR scatter (8 workers, no atomics) | 1.258 | 166,200 | 295 | SHA OK; **reverted**. Timing tied the best sparse run but peak rose 1.1 MB and S rose 14 lines, reducing K. |
+| Sparse-search thread sweep: 6 / 8 / 10 / 12 / 14 threads | 1.339 / 1.354 / 1.297 / 1.337 / 1.292 | 165,920 / 165,976 / 166,204 / 166,476 / 166,024 | 281 | SHA OK on every official check. 10 retested at 1.279. **Default remains 8**: its earlier kept check was 1.262 / 165,108 and extra threads did not reproducibly beat that while slightly raising memory. |
+| Node-range parallel CSR scatter (8 threads, no atomics) | 1.258 | 166,200 | 295 | SHA OK; **reverted**. Timing tied the best sparse run but peak rose 1.1 MB and S rose 14 lines, reducing K. |
 | **Scatter forward CSR and reverse CSR in separate passes** | **1.230** | **166,084** | **281** | SHA OK; **kept**. Reading the 60 MB triple buffer twice reduced cache thrash from interleaving two random cursor arrays and two random 40 MB edge arrays. K rose to ~8.2. |
 | **Count forward and reverse degrees in separate passes** | **1.197** | **166,316** | **281** | SHA OK; **kept**. The extra sequential triple-buffer read again beat interleaved random writes to both degree arrays. K rose to ~8.3. |
 | **Allocate reverse CSR only after forward scatter finishes** | **1.192** | **166,340** | **282** | SHA OK; **kept**. A small 0.4% timing win; reverse-array first-touch no longer pollutes caches immediately before the forward scatter. |
@@ -130,38 +130,37 @@ and `a81262b0564a1cb2b230b52645f8512e29cd66ed76f57817b6c64f3deb04c609`.
 | **Store common sparse distances in uint16, spill >=65,535 to lazy uint64 slots** | **0.941** | **117,004** | **323** | SHA OK; **kept**. Only six seed-1 final distances exceed 65,535; ordinary searches use 128 KB values per direction. Wall time fell another 4.9%, K rose to ~9.8. |
 | **Deduplicate identical query pairs before search** | **0.931** | **117,064** | **330** | SHA OK; **kept**. Seed 1 has 20 deliberate duplicate queries; an O(q²) 2,000-row prepass removes their searches and copies answers back in input order. K reached ~9.9. |
 
-| Grow the sparse table at 65,536 discovered vertices | 0.949 | 116,912 | 356 | SHA OK, **reverted**: adding a dynamic-table resizing guard cost ~0.5% time and 26 scored lines on the official Acer check; K dropped from ~9.8 to ~9.7. The chosen 2^16 capacity is empirically validated on seed 1 and extra seeds, but is not a mathematical bound for arbitrary inputs. |
-| Final 16-bit, packed-CSR version: query workers 6 / 10 / 12 / 4 | 0.946 / 0.952 / 0.973 / 1.009 | 116,732 / 116,520 / 116,816 / 116,832 | 330 | All sample/full SHA OK with the official Acer check. **Default remains 8**: 0.944 s / 116,792 KB on the adjacent baseline check, with equal/better measured speed than 6 and lower thread overhead than 10/12. |
+| Grow the sparse table at 65,536 discovered vertices | 0.949 | 116,912 | 356 | SHA OK, **reverted**: adding a dynamic-table resizing guard cost ~0.5% time and 26 scored lines on the official test-laptop check; K dropped from ~9.8 to ~9.7. The chosen 2^16 capacity is empirically validated on seed 1 and extra seeds, but is not a mathematical bound for arbitrary inputs. |
+| Final 16-bit, packed-CSR version: query threads 6 / 10 / 12 / 4 | 0.946 / 0.952 / 0.973 / 1.009 | 116,732 / 116,520 / 116,816 / 116,832 | 330 | All sample/full SHA OK with the official test-laptop check. **Default remains 8**: 0.944 s / 116,792 KB on the adjacent baseline check, with equal/better measured speed than 6 and lower thread overhead than 10/12. |
 
-Two further independent generated sample seeds were checked on the Mac against the
+Two further independent generated sample seeds were checked on the local ARM host against the
 official Python reference, with exact byte-identical SHA-256 results: seed 17
 `1c03f6046d75ef9a4e1f5d4cac506904424c56082b559706effeb639b2eac387`,
 seed 18
 `1b5e023631559af75b48e14bc3ed7258f603070ad20d61d9b518fb6b3c170293`.
-These are correctness checks, **not** Acer timings or official-scoring measurements.
+These are correctness checks, **not** the test laptop timings or official-scoring measurements.
 
-The final unchanged eight-worker source was rechecked with the official Acer
+The final unchanged eight-thread source was rechecked with the official test-laptop
 command after the thread sweep: sample SHA OK, full SHA OK, full-process
 five-run median **0.938 s** (0.935, 0.935, 0.938, 0.949, 0.950),
-**117,136 KB** cgroup memory.peak, **S~330**, **K_acer~9.8**.
+**117,136 KB** cgroup memory.peak, **S~330**, **K_test~9.8**.
 The nearest previous official check of the same source gave 0.944 s /
 116,792 KB; treat the ~6 ms difference as measurement noise.
 Additionally, 100 newly generated small random directed graphs with 124
-queries each passed an independent Mac Dijkstra oracle, including large
+queries each passed an independent local ARM host Dijkstra oracle, including large
 uint32 weights, zeroes, loops, unreachable pairs and repeated queries.
 No Docker image, official scoring-machine result, or contest submission
-has been checked by this worker.
+has been checked in that round.
 
 ## Round 3: exact overflow fallback and local verification (Oct 31)
 
 The round-two source above is the unchanged starting point, including the
 failed 2^17 sparse-table, Dial, radix, parallel-CSR and adaptive-frontier
 experiments: **none of those experiments was repeated**. The round-two
-official Acer best, **0.938 s / 117,136 KB**, is historical and must not be
-reported as a round-three measurement. In this session SSH to any server was
-prohibited by the controlling user instruction, so there is **no round-three
-Acer check or cgroup memory reading**. All numbers below are measured on
-the local Apple Silicon Mac, not on the scoring CPU, and cannot be used to
+official test-laptop best, **0.938 s / 117,136 KB**, is historical and must not be
+reported as a round-three measurement. There is **no round-three
+test-laptop check or cgroup memory reading**. All numbers below are measured on
+the local Apple Silicon host, not on the scoring CPU, and cannot be used to
 calculate the official contest K.
 
 ### Baseline phase split, first task
@@ -175,28 +174,28 @@ their graph and query SHA-256 against the spec), the first full run of the
 new source measured **parse 0.053019 s, CSR 0.075828 s, search/queries
 0.446797 s**. Repeated warmed full-size runs were much faster; the medians
 below are the more comparable local readings. The search/queries phase
-includes query parsing, deduplication, worker startup and searching.
+includes query parsing, deduplication, thread startup and searching.
 
-### Change log (paired, 8 full runs per implementation and seed on Mac)
+### Change log (paired, 8 full runs per implementation and seed on local ARM host)
 
 | Trial | Full seed 1 median wall | Full seed 2 median wall | Result |
 |---|---:|---:|---|
 | Round-2 original code, compiled with local Apple Clang -O3 | 0.263816 s | 0.263751 s | Comparison baseline, all published/ref SHA OK |
-| **Round-3 dense fallback at 65,535 entries**, 16-bit compact fast path | **0.274408 s** | **0.279224 s** | **Kept for correctness**. Full reference hashes match; Mac wall +4.0% / +5.9%, no Acer time. Worst-case sparse-table hang removed. |
+| **Round-3 dense fallback at 65,535 entries**, 16-bit compact fast path | **0.274408 s** | **0.279224 s** | **Kept for correctness**. Full reference hashes match; local ARM host wall +4.0% / +5.9%, no test-laptop time. Worst-case sparse-table hang removed. |
 | Branch prediction hints for unlikely dense path vs exact same round-3 source without hints | 0.276022 vs 0.283844 s | 0.287334 vs 0.278387 s | **Reverted**. Opposite seed-level results, no reproducible win. |
 
 For the final fallback source, an isolated warmed full seed-1 run printed
 parse **0.023820 s**, CSR **0.061638 s**, search/queries **0.187581 s**;
 full seed 2 printed **0.024331 / 0.064405 / 0.177770 s**. In the paired
-eight-run seed-1 comparison, the measured median Mac process RSS was
+eight-run seed-1 comparison, the measured median local ARM host process RSS was
 approximately 217.7 MB for round two versus 217.9 MB for round three;
-seed 2 was 215.0 MB versus 212.4 MB. This is *Mac peak RSS*, not the
+seed 2 was 215.0 MB versus 212.4 MB. This is *local ARM host peak RSS*, not the
 cgroup memory.peak used for scoring.
 
 The fallback moves to epoch-tagged dense distance storage only when a
 direction has inserted 65,535 unique nodes, and migrates the current
 sparse records. The sparse table never fills up and lookups never spin
-indefinitely. Dense memory is lazily allocated per search worker/direction.
+indefinitely. Dense memory is lazily allocated per search thread/direction.
 No new runtime dependency was added. Source length including Dockerfile and
 TOML is about **368 nonblank/noncomment lines**, not an official formatted
 SCC line count (the round-two estimate was ~330).
@@ -210,7 +209,7 @@ SCC line count (the round-two estimate was ~330).
 | Seed 17 sample | `1c03f6046d75ef9a4e1f5d4cac506904424c56082b559706effeb639b2eac387` | Existing round-two Python reference, exact |
 | Seed 18 sample | `1b5e023631559af75b48e14bc3ed7258f603070ad20d61d9b518fb6b3c170293` | Existing round-two Python reference, exact |
 | Two disjoint 90k directed rings, 2,051 queries; dense fallback before/after epoch rollover | `319139fc9f0772edbcf88ae907aea054001cf4eb3ef27243f9340fe6091bea63` | Analytic `-1`/1 expected output, exact |
-| 160k directed chain, 17 queries, eight workers overflowing simultaneously | `a28f46fe929dbe5833787155f339977d9591bc7891f69d0ee9956da4b3364a73` | Exact path lengths, exact |
+| 160k directed chain, 17 queries, eight threads overflowing simultaneously | `a28f46fe929dbe5833787155f339977d9591bc7891f69d0ee9956da4b3364a73` | Exact path lengths, exact |
 | 80-node weighted random graph, 2,300 unique queries, 32-bit max weights | `18512b83146b406b9755cb963a99c34fbcf4f46af74b808da4cc5d2f69e82ded` | Independent Python Dijkstra oracle, exact |
 
 Code changes after the last hint experiment were reverted to the measured
@@ -225,11 +224,11 @@ Linux score measurement.
 
 ## Round 4: reverse-CSR redesign, measurements
 
-All checks below use the lead's check script on the Acer Linux test laptop (i5-1035G1, 8 threads): five timed full runs, sample/full/full-seed-2 SHA-256 checks, and cgroup `memory.peak`. Mac timings are identified separately. `S` is the check's formatted line count, not source `wc -l`.
+All checks below use the supplied check script on the Linux test laptop (i5-1035G1, 8 threads): five timed full runs, sample/full/full-seed-2 SHA-256 checks, and cgroup `memory.peak`. local ARM host timings are identified separately. `S` is the check's formatted line count, not source `wc -l`.
 
-| Trial | Acer median (s) | Peak KB | S | Correctness | Decision |
+| Trial | test-laptop median (s) | Peak KB | S | Correctness | Decision |
 |---|---:|---:|---:|---|---|
-| Round-three baseline copied unchanged, eight workers | 1.022 (1.007, 1.008, 1.022, 1.038, 1.063) | 116,340 | 469 | sample/full/seed-2 full SHA OK | baseline; retained separately for comparison |
+| Round-three baseline copied unchanged, eight threads | 1.022 (1.007, 1.008, 1.022, 1.038, 1.063) | 116,340 | 469 | sample/full/seed-2 full SHA OK | baseline; retained separately for comparison |
 | New undirected BFS relabel + packed CSR, original identity hash | 1.643 (1.625, 1.630, 1.643, 1.671, 1.882) | 123,128 | 560 | all three SHA OK | superseded: identity hash clusters all nearby relabelled nodes into same hash buckets |
 | Same BFS relabel + multiplicative distance hash | 1.599 (1.588, 1.592, 1.599, 1.600, 1.645) | 123,092 | 560 | all three SHA OK | faster by 44 ms; kept for further trials, still slower than baseline |
 | Directed/forward-only BFS instead of undirected BFS | 1.420 (1.419, 1.419, 1.420, 1.432, 1.446) | 123,268 | 558 | all three SHA OK | 179 ms faster, still slower than baseline; superseded |
@@ -240,28 +239,28 @@ All checks below use the lead's check script on the Acer Linux test laptop (i5-1
 | **Compact both CSR sides to 4-byte edges**: 21-bit destination, 10-bit inline weight, exception bit and sorted `(edge-index, full-weight)` side vectors | **0.946 (0.934, 0.943, 0.946, 0.946, 0.966)** | **88,180** | **475** | **all three SHA OK** | saves another 4,376 KB and 10 ms; **current best, K ~9.8** |
 | 256-edge blocks for O(1)-size exceptional-weight scans | 0.996 (0.979, 0.984, 0.996, 0.998, 0.999) | 87,608 | 487 | all three SHA OK | 50 ms slower despite 572 KB savings; **reverted** |
 | Extend inline weight sentinel from 1024 to 2047 | 0.984 (0.976, 0.978, 0.984, 0.990, 1.018) | 87,088 | 475 | all three SHA OK | 38 ms slower despite 1,092 KB saved and fewer exception lookups; **reverted** |
-| **Final identical 1024-sentinel 4-byte source recheck** | **1.007 (1.002, 1.007, 1.007, 1.010, 1.017)** | **87,600** | **475** | **all three SHA OK** | final pinned revision; same source as the 0.946 s Acer trial, showing ~6% run-to-run/session variability; K_acer ~9.5 on final check |
+| **Final identical 1024-sentinel 4-byte source recheck** | **1.007 (1.002, 1.007, 1.007, 1.010, 1.017)** | **87,600** | **475** | **all three SHA OK** | final pinned revision; same source as the 0.946 s the test laptop trial, showing ~6% run-to-run/session variability; K_test ~9.5 on final check |
 
-Additional targeted Mac-only tests: unidirectional Dijkstra *with forward-BFS reordering* used 0.3937 s in the search phase, versus 0.1069 s for bidirectional with the identical remapped CSR. Both produced the exact seed-1 full reference SHA. The single-direction alternative was rejected before spending an Acer check because its search work alone cost 3.7x as much.
+Additional targeted local-host-only tests: unidirectional Dijkstra *with forward-BFS reordering* used 0.3937 s in the search phase, versus 0.1069 s for bidirectional with the identical remapped CSR. Both produced the exact seed-1 full reference SHA. The single-direction alternative was rejected before spending a test-laptop check because its search work alone cost 3.7x as much.
 
-The earlier unidirectional **without** relabeling likewise measured 0.8744 s in the Mac search phase versus 0.1678 s with bidirectional. Neither alternative is used in the final source. Full-graph data has only 3,478 weights above 2047, versus 52,012 above 1023; surprisingly, extending the direct range up to 2046 was slower on Acer despite fewer exception lookups. The original 1024-sentinel 4-byte design remains the fastest tested configuration.
+The earlier unidirectional **without** relabeling likewise measured 0.8744 s in the local ARM host search phase versus 0.1678 s with bidirectional. Neither alternative is used in the final source. Full-graph data has only 3,478 weights above 2047, versus 52,012 above 1023; surprisingly, extending the direct range up to 2046 was slower on the test laptop despite fewer exception lookups. The original 1024-sentinel 4-byte design remains the fastest tested configuration.
 
-Final source, Apple Silicon warm runs on seed-1 full: parse 0.019838/0.022254/0.019971 s (median **0.019971 s**), CSR 0.066547/0.067031/0.062097 s (median **0.066547 s**), query processing 0.185274/0.225048/0.180185 s (median **0.185274 s**). Seed-2 full also matched its published expected SHA. These are *not* Acer/scoring-machine phase figures; the standard Acer checker does not expose its internal phase split. A measured `parse <30 ms` result on Acer cannot honestly be claimed.
+Final source, Apple Silicon warm runs on seed-1 full: parse 0.019838/0.022254/0.019971 s (median **0.019971 s**), CSR 0.066547/0.067031/0.062097 s (median **0.066547 s**), query processing 0.185274/0.225048/0.180185 s (median **0.185274 s**). Seed-2 full also matched its published expected SHA. These are *not* the test laptop/scoring-machine phase figures; the standard test-laptop checker does not expose its internal phase split. A measured `parse <30 ms` result on the test laptop cannot honestly be claimed.
 
-Final Acer check, pasted verbatim:
+Final test-laptop check, pasted verbatim:
 
 ```text
 sample sha OK d-sample/distances.txt
 full sha OK d-full/distances.txt
 full2 (seed 2) sha OK d-full2/distances.txt
-full T median 1.007 s (runs 1.002 1.007 1.007 1.010 1.017)  memory.peak 87600 KB  S 475 (official count)  K_acer~9.5
+full T median 1.007 s (runs 1.002 1.007 1.007 1.010 1.017)  memory.peak 87600 KB  S 475 (official count)  K_test~9.5
 ```
 
-Mac seed-1 phases, `SD_PROFILE=1`, Clang `-O3` on Apple Silicon (not Acer scoring): original new design with undirected BFS and direct hash was parse 0.0559 s, BFS 0.1486 s, final CSR 0.1337 s, search 0.2012 s (first/cold read); with BFS disabled on the same binary 0.0195/0/0.0595/0.1678 s. Multiplicative hashing cut the relabeled search to 0.1038 s, but did not repay the extra BFS plus CSR construction. A forward-only BFS (temporary `m` instead of `2m` arcs) measured 0.0541/0.0874/0.1339/0.0970 s on Mac and matched seed-1 full SHA; Acer check pending.
+local ARM host seed-1 phases, `SD_PROFILE=1`, Clang `-O3` on Apple Silicon (not the test laptop scoring): original new design with undirected BFS and direct hash was parse 0.0559 s, BFS 0.1486 s, final CSR 0.1337 s, search 0.2012 s (first/cold read); with BFS disabled on the same binary 0.0195/0/0.0595/0.1678 s. Multiplicative hashing cut the relabeled search to 0.1038 s, but did not repay the extra BFS plus CSR construction. A forward-only BFS (temporary `m` instead of `2m` arcs) measured 0.0541/0.0874/0.1339/0.0970 s on local ARM host and matched seed-1 full SHA; the test laptop check pending.
 
-With packed edges remapped once, Mac full seed-1 phases were parse 0.0190 s, relabel/remap 0.1057 s, CSR 0.0721 s, search 0.1095 s; the preprocessing still costs more than it saves. The relabeling/hash interaction was real: using `node & 65535` for BFS-ordered IDs is very collision-prone, while the multiplicative hash restores uniformly distributed slots. But overall Acer wall time and K decreased, so BFS renumbering is not retained as default.
+With packed edges remapped once, local ARM host full seed-1 phases were parse 0.0190 s, relabel/remap 0.1057 s, CSR 0.0721 s, search 0.1095 s; the preprocessing still costs more than it saves. The relabeling/hash interaction was real: using `node & 65535` for BFS-ordered IDs is very collision-prone, while the multiplicative hash restores uniformly distributed slots. But overall the test laptop wall time and K decreased, so BFS renumbering is not retained as default.
 
-Reconstructing the second CSR direction from the first instead of rescanning the 64-bit parsed triples permits those buffers to be freed *before* the second 5M-edge CSR allocation. The reverse-to-forward order beat forward-to-reverse on Acer and in local two-seed phase tests, despite exact same graph and SHA outputs. With 4-byte edges, weights above 1023 (52,012 of seed-1's 5,000,000 arcs) live in sorted exceptional-weight lookup vectors keyed by *CSR edge index*. These vectors are consulted only for flagged arcs, so full 32-bit weights and zero-cost arcs are preserved. The block-index alternative was correctly hashed but slower, so binary search remains.
+Reconstructing the second CSR direction from the first instead of rescanning the 64-bit parsed triples permits those buffers to be freed *before* the second 5M-edge CSR allocation. The reverse-to-forward order beat forward-to-reverse on the test laptop and in local two-seed phase tests, despite exact same graph and SHA outputs. With 4-byte edges, weights above 1023 (52,012 of seed-1's 5,000,000 arcs) live in sorted exceptional-weight lookup vectors keyed by *CSR edge index*. These vectors are consulted only for flagged arcs, so full 32-bit weights and zero-cost arcs are preserved. The block-index alternative was correctly hashed but slower, so binary search remains.
 
 Baseline check output:
 
@@ -269,26 +268,26 @@ Baseline check output:
 sample sha OK d-sample/distances.txt
 full sha OK d-full/distances.txt
 full2 (seed 2) sha OK d-full2/distances.txt
-full T median 1.022 s (runs 1.007 1.008 1.022 1.038 1.063)  memory.peak 116340 KB  S 469 (official count)  K_acer~8.9
+full T median 1.022 s (runs 1.007 1.008 1.022 1.038 1.063)  memory.peak 116340 KB  S 469 (official count)  K_test~8.9
 ```
 
-## Round 5: Acer phase-led optimization
+## Round 5: the test laptop phase-led optimization
 
 Scoring-box result of the retained round-5 code (commit b9ecadc): `run-f5b0df3043ce`, T **0.5616 s**, M **90.3 MB**, S 473, K **12.56** (round 3 on the box: `run-cc09d078ef19`, 0.5551 s, 119.3 MB, S 423, K 12.1). Time is flat on the 12-thread box; the gain is the 29 MB memory cut from the round-4 layout, which outweighs the 50 extra counted lines.
 
-All measurements below use the lead's check script (`check1.sh d`) on the Acer test laptop. Every checker run validates sample/full/seed-2-full hashes, runs five timed full trials, measures `memory.peak`, and counts formatted source lines. Source changes are retained only when all hashes remain correct and the checker's printed K increases.
+All measurements below use the supplied check script (`check1.sh d`) on the test laptop. Every checker run validates sample/full/seed-2-full hashes, runs five timed full trials, measures `memory.peak`, and counts formatted source lines. Source changes are retained only when all hashes remain correct and the checker's printed K increases.
 
-| Trial | Acer median (five times) | Peak KB | Official S | K_acer | Decision |
+| Trial | test-laptop median (five times) | Peak KB | Official S | K_test | Decision |
 |---|---|---:|---:|---:|---|
 | r5-baseline, copied Round 4 | 0.951 s (0.945 0.947 0.951 0.956 0.960) | 88,328 | 475 | 9.8 | Baseline; all SHA OK |
 | r5-smaller-frontier, expand whichever Dijkstra queue has fewer heap entries | 0.929 s (0.925 0.927 0.929 0.936 0.936) | 88,080 | 473 | 9.9 | **Kept**; all SHA OK, +0.1 K |
 | r5-smaller-distance, expand minimum-distance queue except for enormous frontier distances | 0.970 s (0.967 0.968 0.970 0.977 1.010) | 88,228 | 475 | 9.7 | **Reverted**; all SHA OK but lower K |
-| r5-32k-sparse-dist, halve each per-worker sparse-distance hash table | 0.857 s (0.851 0.855 0.857 0.862 0.866) | 223,888 | 473 | 8.5 | **Reverted**; all SHA OK, but a query triggered dense fallback and sharply increased memory peak, overwhelming the speed gain |
-| r5-6-workers, reduce query threads from eight to six | 0.948 s (0.945 0.946 0.948 0.955 0.958) | 87,808 | 473 | 9.8 | **Reverted**; fewer threads lowered K |
+| r5-32k-sparse-dist, halve each per-thread sparse-distance hash table | 0.857 s (0.851 0.855 0.857 0.862 0.866) | 223,888 | 473 | 8.5 | **Reverted**; all SHA OK, but a query triggered dense fallback and sharply increased memory peak, overwhelming the speed gain |
+| r5-6-threads, reduce query threads from eight to six | 0.948 s (0.945 0.946 0.948 0.955 0.958) | 87,808 | 473 | 9.8 | **Reverted**; fewer threads lowered K |
 | r5-forward-exception-scan, replace binary search with monotone exception iterator when reconstructing CSR | 0.928 s (0.926 0.927 0.928 0.936 0.943) | 87,712 | 472 | 9.9 | **Reverted by strict rule**; SHA OK but printed K tied incumbent 9.9 |
-| r5-unpacked-heap, use 16-byte aligned heap elements instead of packed 12-byte elements | 0.984 s (0.941 0.948 0.984 1.083 1.145) | 87,716 | 473 | 9.6 | **Reverted**; slower and lower K, with visible Acer timing variability |
+| r5-unpacked-heap, use 16-byte aligned heap elements instead of packed 12-byte elements | 0.984 s (0.941 0.948 0.984 1.083 1.145) | 87,716 | 473 | 9.6 | **Reverted**; slower and lower K, with visible the test laptop timing variability |
 | r5-parallel-reverse-scatter, 12 concurrent atomic reverse-CSR cursors with thread-local exceptional-weight lists | 0.916 s (0.913 0.915 0.916 0.922 0.929) | 90,048 | 491 | 9.9 | **Reverted by strict rule**; SHA OK and time improved, but memory/source costs kept K tied |
-| r5-128k-sparse-dist, double per-worker hash-table entries to reduce collision chains | 1.057 s (1.049 1.051 1.057 1.062 1.075) | 88,088 | 473 | 9.3 | **Reverted**; source remained correct, larger hot-table footprint hurt cache performance |
+| r5-128k-sparse-dist, double per-thread hash-table entries to reduce collision chains | 1.057 s (1.049 1.051 1.057 1.062 1.075) | 88,088 | 473 | 9.3 | **Reverted**; source remained correct, larger hot-table footprint hurt cache performance |
 | r5-fused-degree-count, count both CSR in/out degrees in one pass over parsed arcs | 0.959 s (0.954 0.956 0.959 0.959 0.963) | 88,320 | 472 | 9.7 | **Reverted**; coupling two random degree arrays was slower |
 
 Final clean checker on the restored best candidate:
@@ -297,9 +296,53 @@ Final clean checker on the restored best candidate:
 sample sha OK d-sample/distances.txt
 full sha OK d-full/distances.txt
 full2 (seed 2) sha OK d-full2/distances.txt
-full T median 0.931 s (runs 0.927 0.931 0.931 0.933 0.946)  memory.peak 88384 KB  S 473 (official count)  K_acer~9.9
+full T median 0.931 s (runs 0.927 0.931 0.931 0.933 0.946)  memory.peak 88384 KB  S 473 (official count)  K_test~9.9
 ```
 
-The final source differs from Round 4 only by using the smaller bidirectional heap frontier to select the side to expand. The original's special-case correctness is preserved; every official Acer SHA check across all variants matched the reference. Relative to the first clean Round 5 measurement, 0.951 s / 88,328 KB / S 475 / K 9.8, the final scored 0.931 s / 88,384 KB / S 473 / K 9.9. These are measurements on Acer's eight-thread laptop, not the twelve-thread official scoring box, and the run-to-run difference is small enough that the original Round 4 source's score cannot be distinguished without more trials.
+The final source differs from Round 4 only by using the smaller bidirectional heap frontier to select the side to expand. The original's special-case correctness is preserved; every official test-laptop SHA check across all variants matched the reference. Relative to the first clean Round 5 measurement, 0.951 s / 88,328 KB / S 475 / K 9.8, the final scored 0.931 s / 88,384 KB / S 473 / K 9.9. These are measurements on the test laptop's eight-thread CPU, not the twelve-thread official scoring box, and the run-to-run difference is small enough that the original Round 4 source's score cannot be distinguished without more trials.
 
 The baseline was profiled using a temporary print-to-stderr build via a one-run profiling script (not used as a timing score): parse **0.039010 s**, CSR construction **0.288704 s**, search/query handling **0.599055 s**, combined single-run wall **0.934013 s**. Hence search dominates (roughly 64% of the wall), followed by CSR (31%); parse is already ~4%. Profiling output was removed from the official candidate before the next checker. The smaller-frontier change still uses the standard valid bidirectional Dijkstra stopping condition and handles all special paths/weights correctly on the three test sets.
+
+## Round 6
+
+Round 6 changes three parts of the retained source: the common Dijkstra heap is packed into one 64-bit word with exact promotion above 2^43, reverse and forward CSR scatter cursors no longer overlap in memory, and edge weights 0 through 2046 are inline with 2047 as the exception sentinel.
+
+The official Round 6 check on the test laptop used sample, full seed 1, and independent full seed 2 SHA gates for every row. Memory is the minimum of three memory.peak readings.
+
+| Source | Full T median | Five timed runs | memory.peak KB | Official S | K | Result |
+|---|---:|---|---:|---:|---:|---|
+| Round 5 | 1.074 s | 0.935, 0.953, 1.074, 1.138, 1.157 | 87,600 | 512 | 9.1 | all three SHA gates passed |
+| query-hash candidate | **0.893 s** | 0.887, 0.889, 0.893, 0.903, 0.904 | **80,628** | 572 | **10.0** | correct, same reported K as retained source |
+| cursor-big2047 | 0.897 s | 0.892, 0.895, 0.897, 0.898, 0.905 | 80,632 | 562 | **10.0** | retained |
+
+The hash-deduplicated query variant was four milliseconds faster in this check but cost ten official source lines and did not improve the reported K. The current source therefore keeps the smaller cursor-big2047 design.
+
+### Rejected Round 6 experiments
+
+The local screens below are direction checks, not test-laptop scores.
+
+| Experiment | Measured result | Decision |
+|---|---|---|
+| packed tentative-distance entry | 0.279426 s / 210.08 MB versus baseline 0.263779 s / 207.68 MB | rejected; slower and larger |
+| parse graph twice for direct CSR | CSR phase 0.256203 s versus baseline 0.063385 s | rejected; serial rescans erased the memory benefit |
+| dynamic 32k sparse-distance table | 0.280229 s / 206.63 MB versus fixed 64k 0.257887 s / 208.22 MB | rejected; small memory saving, much slower |
+| dynamic sparse growth at 50/65/80/90% | 0.28513 / 0.29097 / 0.28715 / 0.29884 s versus fixed baseline 0.27867 s | rejected |
+| four-way packed heap | 0.26286 s versus compact binary 0.25311 s | rejected |
+| alternate frontier policies | 0.24758 / 0.25935 / 0.25309 / 0.25472 / 0.65843 s versus incumbent 0.24249 s | rejected; minimum-frontier-distance policy was especially poor |
+| multiplicative sparse hash | 0.244816 s versus 0.244334 s | rejected |
+| Floyd bottom-up heap pop | 0.243975 s versus 0.242876 s | rejected |
+| branch hints | 0.250531 s versus 0.243729 s | rejected |
+| owner-partitioned CSR, 2/4/8 owners | total 0.29260 / 0.26504 / 0.26658 s and CSR 0.09785 / 0.07497 / 0.07314 s versus baseline 0.26013 / 0.06631 s | rejected |
+| in-place CSR cursor | 0.25248 s / 195.08 MB versus staged cursor 0.24221 s / 201.47 MB | not retained; larger memory saving but slower |
+| direct end-offset CSR | 0.25096 s / 193.57 MB versus staged cursor 0.24833 s / 200.49 MB | not retained; modest time loss |
+| generic heap templates | 0.25562 s versus staged cursor 0.24943 s while saving about 18 formatted source lines | rejected by time |
+| warm-forward starts | 0.23542 / 0.23914 / 0.23093 / 0.25096 / 0.24050 s for 4/8/16/32/64 pops versus 0.22925 s incumbent | rejected |
+
+Independent local verification reproduced the performance direction and correctness of the main candidates. In one 24-run comparison the medians were 0.268657 s for Round 5, 0.246075 s for packed heap, and 0.236358 s for query-hash. A separate staged-cursor check reduced median peak RSS from 208.51 MB to 201.55 MB. Another pair measured cursor-big2047 at 0.234466 s and query-hash at 0.229706 s. These local values are not substitutes for the official table above.
+
+Board run: run-2173e5a5b349 (commit 21366f8)
+
+
+## Later board samples of this code
+
+run-5e780c918ea1 (commit 3c1843d): T 0.569403 s, M 82,649,088, S 523, K 12.50. run-4bf32e42d888 (commit 5f6611a): T 0.569763 s, M 83,042,304, S 523, K 12.49.

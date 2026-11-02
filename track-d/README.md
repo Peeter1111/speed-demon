@@ -1,26 +1,25 @@
 # Track D: Traverse
 
-Dependency-free C++20 implementation of exact directed shortest-path queries for Speed Demon 2026. It reads `/data/graph.txt` and `/data/queries.txt` and writes only `/out/distances.txt`, preserving input query order. The executable accepts alternate data/output directories as positional arguments for testing.
+traverse.cpp is a dependency-free C++20 implementation of exact directed shortest-path queries. It reads graph.txt and queries.txt, preserves query order, and writes distances.txt. Optional positional arguments select alternate input and output directories.
 
-## Approach
+## Graph representation
 
-Twelve newline-aligned workers parse the read-only mmap of the ASCII graph into compact 64-bit `(source, target, weight)` records. Rare weights above the inline limit retain their full 32-bit values in side arrays. CSR degree counting is done in separate sequential passes to avoid concurrent random degree updates. The **reverse CSR is built first**, then the packed parse buffers are released. The forward CSR is reconstructed exactly from the reverse edges, avoiding the peak-memory cost of holding both final CSR arrays alongside the temporary parse records.
+For a full graph, twelve newline-aligned parsing threads convert the ASCII edges into compact 64-bit temporary records. Weights too large for the temporary packed field are kept in side vectors. Degree counts are accumulated into forward and reverse prefix arrays.
 
-Each final edge is one 32-bit integer: a 21-bit destination and an 11-bit weight field. Inline weights are 0–1023; field value 1024 is a sentinel, with full weights of 1024 or greater kept in sorted `(CSR-index, weight)` exception arrays. Zero-weight edges, parallel edges, self-loops, and paths exceeding 32 bits remain exact. Node ranges combine a 23-bit start and small degree in one 32-bit word. The graph layout requires no extra runtime libraries or precomputed input-specific index.
+The reverse CSR is built first. After reverse scatter, the temporary parsed edge buffers and the reverse scatter cursor are released. Only then is the forward scatter cursor allocated and the forward CSR reconstructed from the reverse CSR. This staged cursor lifetime is a Round 6 memory reduction.
 
-Eight query workers take unique queries from an atomic counter. Each uses bidirectional Dijkstra with two compact binary heaps, expanding whichever side has fewer heap entries and stopping only when the sum of frontier minima proves the current complete route optimal. Per-worker tentative distances use epoch-tagged 65,536-entry sparse tables, 16-bit common distances and full 64-bit overflow values; a lazy dense fallback handles any query that fills the sparse table. Fast checks handle identical nodes and vertices with no outgoing/incoming arcs; repeated query pairs reuse the result. Each worker writes into its assigned original output slot, and a final sequential pass produces the exact text file.
+Each final edge is one 32-bit word with a 21-bit destination and an 11-bit weight field. Weights 0 through 2046 are inline. The value 2047 is a sentinel for a full 32-bit weight stored in a sorted side vector keyed by CSR edge index. Node ranges pack a 23-bit start offset and degree into one 32-bit word.
 
-An undirected and directed BFS locality renumbering were implemented and checked on two full input seeds, but both lost end-to-end Acer performance to their preprocessing cost. A remapping-aware multiplicative hash significantly improved their search phase, but not enough to justify keeping relabeling in the final design. Unidirectional Dijkstra was also materially slower on the test distribution. All tested variants are logged in `PERF.md`.
+## Search
 
-## Build and testing
+Eight query threads run bidirectional Dijkstra by default. Each search expands the side with the smaller heap and stops when the two frontier minima prove that the best complete route cannot improve.
 
-The two-stage Dockerfile pins allowlisted GCC 15 and Debian 13 images, uses `-O3 -march=x86-64-v3 -pthread` with statically linked C++ runtimes, and adds no external runtime dependency.
+The common heap representation is one sortable 64-bit word containing a 21-bit node id and a 43-bit distance. If any valid heap distance reaches 2^43, that heap promotes itself to the full-width representation and remains exact. Per-side tentative distances use epoch-tagged 65,536-entry sparse tables with a 16-bit common-distance value and full 64-bit overflow storage. A dense per-node fallback is allocated lazily if a sparse table fills. Epoch tables are reset before the 11-bit epoch counter wraps.
 
-```sh
-g++ -std=c++20 -O3 -march=x86-64-v3 -pthread -DNDEBUG -static-libstdc++ -static-libgcc -o traverse traverse.cpp
-./traverse /path/to/data /path/to/output-directory
-```
+Repeated query pairs are still detected by the simple exact earlier-query scan. The separate hash-dedup experiment was slightly faster on the test laptop but had the same reported K and more source, so it is not part of the retained source. SD_THREADS=N overrides query-thread count and SD_PROFILE=1 prints phase timings.
 
-`SD_THREADS=N` overrides the query-worker count. `SD_PROFILE=1` prints parse, CSR and search phase durations on standard error using monotonic timing. `PERF.md` records exact SHA checks against seed-1 sample, seed-1 full and seed-2 full and the Acer five-run medians; these are measured on a test Intel laptop, not an official contest score.
+## Build and validation
 
-With 24 more hours: benchmark explicit per-phase timing on the official i5-13500 12-thread CPU, explore parallel CSR scatter with per-thread disjoint node partitions, and evaluate whether any small compact landmark potential repays its indexing cost. Any further change must pass the full SHA-256 gate before replacing this design.
+The pinned two-stage Dockerfile builds with GCC 15 using -std=c++20 -O3 -march=x86-64-v3 -pthread -DNDEBUG, statically links the GCC runtimes, and has no external runtime dependency.
+
+The Round 6 test-laptop check passed sample, full seed 1, and independent full seed 2 SHA gates. The retained cursor-big2047 source measured 0.897 s median, 80,632 KB memory.peak, official S 562, and K about 10.0. The same check measured the Round 5 source at 1.074 s, 87,600 KB, S 512, and K about 9.1. Full measurements, rejected variants, and independent local checks are in PERF.md.

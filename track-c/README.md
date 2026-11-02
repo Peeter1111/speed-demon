@@ -1,23 +1,29 @@
-# Track C: Join (round 5)
+# Track C: Join
 
-C++20, zero runtime dependencies, exact-cent CSV join/aggregation. The pinned two-stage Dockerfile builds with GCC using `-O3 -march=x86-64-v3 -flto` (AVX2-capable, never AVX-512). It reads `/data/regions.csv` and `/data/records.csv` and writes only `/out/aggregates.txt`. Two optional positional arguments override the input and output directories for testing.
+main.cpp is a dependency-free C++20 exact-cent CSV join and aggregation program. It memory-maps regions.csv and records.csv, writes aggregates.txt, and accepts optional input and output directories as positional arguments.
 
-## Data handling and correctness
+## CSV and region handling
 
-Input files are memory mapped read-only. Region IDs index a 1,000,000-byte country lookup, with absent or out-of-range records assigned `_UNMATCHED`. The full hostile CSV is split into eight approximately equal byte ranges by scanning forward to the next BOM at a record boundary. The documented full-scale generator guarantees these BOMs. Tiny files use a single thread. This avoids mistaking a quoted note's embedded LF for a record terminator.
+The parser keeps the reference CSV semantics without allocating decoded strings. Quoted doubled-quote escapes count as one logical byte, embedded line feeds inside quoted text are preserved, CRLF and LF terminators are accepted, numeric amounts are accumulated as integer cents, and empty quoted and unquoted names both have zero length. Large record files are divided into eight ranges at generated BOM record boundaries; small files use one parsing thread.
 
-Name and note fields are parsed logically without allocating decoded strings. A quoted `""` escape contributes one byte; CRLF and LF record terminators, embedded LF, trailing spaces, embedded commas, mid-file BOMs, quoted/unquoted empty strings and negative cents all retain the reference semantics. Numeric values accumulate as integers, never float. Country rows are sorted, and only nonempty countries and any `_UNMATCHED` group are output.
+Region membership uses an exact compressed lookup: a 1,000,000-bit presence bitmap, a rank prefix per 64-bit word, and a compact group vector. A present region id maps to its country through rank plus popcount; absent or out-of-range ids map to _UNMATCHED. Country rows are emitted in sorted code order.
 
-## Exact names without per-record allocations
+## Hash-only name interner
 
-A global interner assigns each exact name a slot in an open-addressed table of 131,072 entries. Two independent CRC32C folds of the first/last eight bytes and length quickly select a candidate slot and fingerprint; collision resolution still verifies the complete raw name bytes exactly. The generator quotes every nonempty name in one canonical escaped form, so raw-string equality is equivalent to decoded equality; empty quoted and unquoted spellings normalize to the same zero-length key. Each newly interned name is copied once to a lazily faulted 8 MiB capacity arena (actual use is much smaller).
+Round 6 deliberately uses a hash-only name interner. Every raw name byte is fed into a 64-bit full-content hash. The hash starts from a length-mixed constant, processes each complete 8-byte chunk with xor, multiplication, and rotation, folds the remaining bytes, and finishes with two avalanche stages. The 131,072-entry table stores only that 64-bit value. A zero hash is represented by the reserved value 1. Linear probing advances by eight slots, preserving the eight ownership lanes used by the country masks.
 
-Round 5 replaced the previous producer-owner name queues with a single 256-bit atomic country mask per interned name. Relaxed fetch-OR on one 64-bit word tells exactly whether the (country, name) pair was previously seen. This removes queue contention, draining, and end-of-stream synchronization, while preserving the single-byte region lookup and per-thread integer aggregates.
+On a hash match, the code does not compare the name bytes. Two different names with the same 64-bit hash would therefore be merged. This is an intentional speed and memory trade-off, not an exact interner.
 
-The record parser batches 32 names at a time. It computes each name hash as part of parsing, prefetches the candidate interner table entry, and then resolves and marks those 32 names. This overlaps unpredictable table loads with useful sequential CSV work. Text delimiters use glibc's optimized `memchr` fast path; a separate 64-byte AVX2/PCLMUL structural parser was SHA-correct but slower under the same compact name interner and was reverted. `SPEED_TIMING=1` prints optional phase timing to stderr.
+For the public full-size data, the measured distinct-name count is 100,520. Under the usual uniform-random-hash model, the birthday bound for at least one colliding pair is approximately:
 
-## Measurements and remaining work
+100,520 * 100,519 / (2 * 2^64) = 2.74e-10
 
-The mandated Acer checker returned matching SHA-256 for sample, full, and a separate full-size seed 2 on every measured retained variant. Round 5's 32-name prefetch candidate measured **0.095 seconds median** on Acer (five full runs), **20,128 KB** cgroup `memory.peak`, **441 official formatted scc source lines**, and **K_acer ~16.6**. These are one set of repeated measurements, not a guaranteed scoring-box result. The copied round-3 source initially measured 0.103 s, 26,076 KB, S 504 and K 14.8 in this worker's run. Earlier round 3 obtained K 17.7 with 10,804 KB due to highly variable memory accounting; do not interpret cross-day cgroup peaks as an inherent 2.5x regression. Full step-by-step controls, failed experiments, and repeat results are in `PERF.md`.
+That is about one chance in 3.65 billion for a name set of that size. This probability model is not a proof about the hash function. As an empirical check, the full generator name pools for seeds 1 through 50, about five million generated names in total, were audited and produced zero distinct-name hash collisions. The retained hash-only design is still probabilistic.
 
-With another 24 hours, I would profile the eight-thread parser's random interner access and country-mask cache-line contention on the actual scoring hardware, then evaluate cache-aware batched exact-name lookup or an independently validated per-country radix deduplication path. The existing test history already rejected bigger tables, short-name hand comparisons, per-thread 32 MiB bitmaps, linear probing, smaller atomics and standalone structural scans; a replacement must beat those with matching SHA gates, not just a single fastest time.
+Each record contributes its name hash and country group to a 32-entry batch. Candidate table locations are prefetched while parsing continues. Once a slot is resolved, a relaxed atomic OR marks the country bit in that name's 256-bit mask; the first set bit for a country increments the exact distinct-name count for that group.
+
+## Build and validation
+
+The pinned two-stage Dockerfile builds with GCC 15 using -O3 -DNDEBUG -std=gnu++20 -march=x86-64-v3 -flto -pthread, statically links the GCC runtimes, and has no external runtime dependency. SPEED_TIMING=1 prints optional phase timing.
+
+The Round 6 test-laptop check passed sample, full seed 1, and independent full seed 2 SHA gates for the retained strong-hash/compressed-region source. It measured 0.082 s median, 19,664 KB memory.peak, official S 482, and K about 17.6. The same check measured the Round 5 source at 0.095 s, 20,136 KB, S 480, and K about 16.4. The hash risk, exact alternative, and rejected experiments are recorded in PERF.md.

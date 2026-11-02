@@ -36,7 +36,7 @@ timestamp outside the 72-hour span, more than 6,000 distinct endpoints, a missin
 
 ## Another 24 hours
 
-See PERF.md for the kept and rejected round-five trials. On Acer, 4-byte records and smaller blocks reduced
+See PERF.md for the kept and rejected round-five trials. On local test laptop, 4-byte records and smaller blocks reduced
 peak memory by roughly 3.2 MB and gave median wall-time improvements in two of three repeat checks, though
 timings fluctuate with machine contention. Two-digit formatting, `to_chars`, lower selection thresholds,
 SWAR newline discovery, different worker counts and mmap advice were tested and reverted. The next large
